@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import {
   getProfile, sendMessage, listChatMessages, type Profile, type ChatMessage,
   getConfigStatus, getSufficiency, type ConfigStatus, type DataSufficiency,
+  getMem0Status, type Mem0Status,
   type ChatMode,
 } from '../api/client'
 
@@ -45,6 +46,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null)
   const [sufficiency, setSufficiency] = useState<DataSufficiency | null>(null)
+  const [mem0Status, setMem0Status] = useState<Mem0Status | null>(null)
   const [mode, setMode] = useState<ChatMode>('daily_chat')
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -56,16 +58,18 @@ export default function ChatPage() {
     if (!isValidId) return
     try {
       setLoading(true)
-      const [p, msgs, cfg, suff] = await Promise.all([
+      const [p, msgs, cfg, suff, m0] = await Promise.all([
         getProfile(profileId),
         listChatMessages(profileId),
         getConfigStatus().catch(() => null),
         getSufficiency(profileId).catch(() => null),
+        getMem0Status().catch(() => null),
       ])
       setProfile(p)
       setMessages(msgs)
       setConfigStatus(cfg)
       setSufficiency(suff)
+      setMem0Status(m0)
     } catch (e: any) {
       setError(`请求人物 ${profileId} 失败: ${e.message}`)
     } finally {
@@ -222,6 +226,24 @@ export default function ChatPage() {
                 <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <span className={`chat-provider-badge ${configStatus.is_mock ? 'mock' : 'deepseek'}`}>
                     {configStatus.is_mock ? 'Mock 演示模式' : 'DeepSeek API 已启用'}
+                  </span>
+                </div>
+              )}
+
+              {/* mem0 Status Badge */}
+              {mem0Status && (
+                <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span className={`chat-provider-badge ${
+                    mem0Status.installed && mem0Status.enabled ? 'deepseek' :
+                    mem0Status.installed ? 'mock' : 'mock'
+                  }`}>
+                    {mem0Status.installed && mem0Status.enabled
+                      ? 'mem0 长期记忆已启用'
+                      : mem0Status.installed
+                        ? 'mem0 已安装未启用'
+                        : mem0Status.error
+                          ? `mem0: ${mem0Status.error}`
+                          : 'mem0 未安装'}
                   </span>
                 </div>
               )}

@@ -179,3 +179,60 @@ export const exportDataset = (profileId: number) =>
 // MinerU status
 export const getMineruStatus = () =>
   request<MineruStatus>('/integrations/mineru/status');
+
+// mem0 status
+export interface Mem0Status {
+  installed: boolean;
+  enabled: boolean;
+  provider: string;
+  error: string | null;
+}
+export const getMem0Status = () =>
+  request<Mem0Status>('/integrations/mem0/status');
+
+// Memory operations
+export interface MemoryRebuildResult {
+  stored: number;
+  error: string | null;
+}
+export const rebuildMemories = (profileId: number) =>
+  request<MemoryRebuildResult>(`/profiles/${profileId}/memory/rebuild`, { method: 'POST' });
+
+export interface MemorySearchResult {
+  results: { id: string; memory: string; score: number | null }[];
+  query: string;
+  total: number;
+}
+export const searchMemories = (profileId: number, query: string, limit: number = 5) =>
+  request<MemorySearchResult>(`/profiles/${profileId}/memory/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+
+// Document management
+export interface DocumentPreview {
+  document_id: number;
+  filename: string;
+  parser: string | null;
+  parse_status: string | null;
+  char_count: number;
+  preview_text: string;
+  source: string;
+}
+export const deleteDocument = (profileId: number, documentId: number) =>
+  request<{ message: string; detail: string }>(`/profiles/${profileId}/documents/${documentId}`, { method: 'DELETE' });
+
+export const rebuildChunks = (profileId: number) =>
+  request<{ message: string; detail: string }>(`/profiles/${profileId}/rebuild-chunks`, { method: 'POST' });
+
+export const previewDocument = (profileId: number, documentId: number) =>
+  request<DocumentPreview>(`/profiles/${profileId}/documents/${documentId}/preview`);
+
+// SFT Export
+export interface SFTExport {
+  profile_id: number;
+  profile_name: string;
+  format: string;
+  filename: string;
+  total_records: number;
+  content: string;
+}
+export const exportSFT = (profileId: number) =>
+  request<SFTExport>(`/profiles/${profileId}/export/sft`);

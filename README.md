@@ -9,33 +9,47 @@ AI 人物风格档案 / AI 记忆对话库 — 基于用户提供的资料，自
 - 涉及他人隐私资料时，请确保已获得**合法授权**
 - 对话机器人会拒绝冒充真人、生成欺骗性内容、伪造遗嘱、做出法律/医疗/财务决定等请求
 
+## 开源能力栈
+
+本项目定位为 **GitHub 开源项目聚合型 AI Clone 平台**，尽量接入成熟开源项目，自己只写 glue code。
+
+| 能力模块 | 开源项目 | 接入状态 | 说明 |
+|---------|---------|---------|------|
+| 大模型分析 & 对话 | [DeepSeek](https://api.deepseek.com) | ✅ 真实接入 | deepseek-v4-pro / deepseek-v4-flash |
+| 文档解析 | [opendatalab/MinerU](https://github.com/opendatalab/MinerU) | ✅ 真实接入 | CLI 调用，pipeline backend |
+| 人物风格蒸馏 | [nuwa-skill](https://github.com/nuwa-skill/nuwa-skill) / [dot-skill](https://github.com/dot-skill/dot-skill) | ⚠️ 模板理念接入 | 中文自写 Skill.md 兼容模板层 |
+| 长期记忆 | [mem0ai/mem0](https://github.com/mem0ai/mem0) | 🔧 可选接入 | 默认关闭，SQLite 为 fallback |
+| 数据集导出 | [Easy Dataset](https://github.com/ConardLi/easy-dataset) | 🔶 格式兼容导出 | 标准 JSONL 格式 |
+| 微调数据导出 | [LLaMA Factory](https://github.com/hiyouga/LLaMA-Factory) | 🔶 格式兼容导出 | 仅导出 SFT 数据，不训练 |
+| RAG 检索 | 自研 n-gram | 🔶 fallback | 预留 Chroma/Qdrant 接入点 |
+
+详细审计见 [docs/open_source_integration_audit.md](docs/open_source_integration_audit.md)
+
 ## MVP 功能
 
 ### 已完成
 
 1. **人物档案管理** — 创建、查看人物档案（姓名、描述、关系类型：亲人/朋友/同事/伴侣/公众人物/作者等）
 2. **资料上传与处理** — 支持 txt / md / json / csv / pdf / docx / pptx / xlsx / png / jpg / webp，自动文本清洗、分片、去重
-3. **本地轻量检索** — 纯 Python n-gram / 关键词重叠评分检索，SQLite chunks 表存储，零外部依赖
-4. **AI 人物画像** — 调用 LLM 生成中文 Markdown 人物画像报告（思维模型、表达DNA、情绪倾向、价值观、可模拟程度评估、合规边界）
-5. **AI 风格卡** — 生成结构化风格卡（角色定位、认知方式、表达风格、决策习惯、情绪模式、回答边界、Prompt 使用建议）
-6. **RAG 对话** — 本地检索 + 风格卡 + skill template system prompt → 模拟角色对话，聊天回复为自然语言（非 JSON）
-7. **DeepSeek 真实接入** — 支持 DeepSeek API（OpenAI-compatible），分析模型和聊天模型可分别配置
-8. **MinerU 真实接入** — 支持 PDF、图片、DOCX、PPTX、XLSX 复杂文档解析为 Markdown，再进入 RAG 和画像分析
-9. **Skill 模板系统** — 借鉴 nuwa-skill / dot-skill 设计理念，根据关系类型自动选择分析模板（公众人物用 nuwa_style，关系型人物用 dot_skill_style）
-10. **Mock 模式** — 无 API Key 时可跑通完整演示流程
-11. **导出功能** — 导出 Skill Card（Markdown）和 Dataset（JSONL），兼容 LLaMA Factory / Easy Dataset
-12. **合规边界** — 前端声明 + System Prompt + 违规请求拒绝三重保障
+3. **资料管理** — 删除文档（含确认弹窗）、预览解析文本（前 3000 字）、重建文本片段
+4. **本地轻量检索** — 纯 Python n-gram / 关键词重叠评分检索，SQLite chunks 表存储，零外部依赖
+5. **AI 人物画像** — 调用 LLM 生成中文 Markdown 人物画像报告（14 模块深度分析）
+6. **AI 风格卡** — 生成结构化可执行风格卡（10 章节），可被 Claude Code / Codex / Cursor 直接读取
+7. **RAG 对话** — 本地检索 + 风格卡 + skill template system prompt → 模拟角色对话，6 种聊天模式
+8. **DeepSeek 真实接入** — 支持 DeepSeek API（OpenAI-compatible），分析模型和聊天模型可分别配置
+9. **MinerU 真实接入** — 支持 PDF、DOCX、PPTX、XLSX、图片解析为 Markdown（可配 backend/method/lang）
+10. **Skill 模板系统** — 借鉴 nuwa-skill / dot-skill 的 Skill.md 理念，中文自写模板文件，支持导入/导出
+11. **mem0 长期记忆（可选）** — 安装 `pip install mem0ai` 并设置 `MEM0_ENABLED=true` 后启用，未安装时使用 SQLite
+12. **Mock 模式** — 无 API Key 时可跑通完整演示流程
+13. **导出功能** — Skill Card（SKILL.md）、RAG Dataset（JSONL）、LLaMA Factory SFT（JSONL）三种导出
+14. **开源能力栈展示** — 首页显示各开源项目的接入状态（已启用/未安装/仅导出支持）
+15. **合规边界** — 前端声明 + System Prompt + 违规请求拒绝三重保障
 
 ### 后续升级方向
 
-- 接入 ChromaDB / Qdrant / FAISS 做向量语义检索
-- 接入 Easy Dataset 完整版做数据集制作
-- 接入 LLaMA Factory 做 LoRA/QLoRA 微调
-- 接入 mem0 做长期记忆
+- 接入 ChromaDB / Qdrant 做向量语义检索
+- 实际运行 LLaMA Factory 训练（当前仅导出数据）
 - 语音克隆（需额外授权）
-- 多语言支持
-
-详见 [docs/integrations.md](docs/integrations.md)
 
 ## 技术栈
 
@@ -215,6 +229,44 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mineru_windows.ps1
 - MinerU 是可选依赖，不影响现有 txt/md/json/csv 上传
 - 上传 PDF/docx 等文件时，如果 MinerU 未安装，接口会返回清晰的 400 错误提示
 
+### 6. （可选）安装 mem0 支持长期记忆
+
+mem0 为 AI 对话提供跨会话的长期记忆层。未安装时，系统使用 SQLite chat_messages 表存储短期历史。
+
+**安装：**
+```bash
+pip install mem0ai
+```
+
+**启用：** 在 `.env` 中设置：
+```env
+MEM0_ENABLED=true
+MEM0_PROVIDER=local
+MEM0_COLLECTION_PREFIX=ai_clone_profile
+```
+
+**验证：** `GET /api/integrations/mem0/status`
+
+**说明：**
+- mem0 不是人物分析模型，而是记忆存储和检索层
+- 人物分析仍由 DeepSeek 完成
+- mem0 调用失败时自动回退到 SQLite，不会导致聊天失败
+- 默认关闭，不影响现有功能
+
+### 7. 导出功能说明
+
+三种导出格式：
+
+| 导出类型 | 端点 | 格式 | 用途 |
+|---------|------|------|------|
+| Skill Card | `GET /api/profiles/{id}/export/skill-card` | SKILL.md Markdown | 可被 Claude Code / Codex / Cursor 读取 |
+| RAG Dataset | `GET /api/profiles/{id}/export/dataset` | JSONL | Easy Dataset 兼容的 RAG 数据集 |
+| SFT Dataset | `GET /api/profiles/{id}/export/sft` | JSONL (messages) | LLaMA Factory 兼容的微调训练数据 |
+
+**关于 LLaMA Factory：** LLaMA Factory 是后续训练工具，需要 PyTorch + GPU。本项目当前只负责导出可训练的标准格式数据，不在本项目中实际运行训练。详见 [LLaMA Factory](https://github.com/hiyouga/LLaMA-Factory)。
+
+**关于 Skill Templates：** 本项目没有直接复制 nuwa-skill/dot-skill 的源码，而是实现了兼容 Skill.md 格式的中文模板层。模板文件位于 `backend/app/skill_templates/templates/`。如需正式接入原仓库，应检查其许可证和运行方式。
+
 ## API 说明
 
 | 方法 | 路径 | 说明 |
@@ -224,14 +276,21 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mineru_windows.ps1
 | `GET` | `/api/profiles/{id}` | 获取档案详情（含最新分析和风格卡） |
 | `POST` | `/api/profiles/{id}/documents` | 上传资料文件（multipart/form-data） |
 | `GET` | `/api/profiles/{id}/documents` | 查看已上传资料列表 |
+| `GET` | `/api/profiles/{id}/documents/{doc_id}/preview` | 预览文档前 3000 字解析文本 |
+| `DELETE` | `/api/profiles/{id}/documents/{doc_id}` | 删除文档及对应 chunks |
+| `POST` | `/api/profiles/{id}/rebuild-chunks` | 重建所有文档的文本片段 |
 | `POST` | `/api/profiles/{id}/analyze` | 生成人物画像和风格卡 |
 | `GET` | `/api/profiles/{id}/analysis` | 查看历史分析报告 |
-| `POST` | `/api/profiles/{id}/chat` | 发送对话消息（RAG） |
+| `POST` | `/api/profiles/{id}/chat` | 发送对话消息（RAG + mem0） |
 | `GET` | `/api/profiles/{id}/chat` | 查看对话历史 |
+| `POST` | `/api/profiles/{id}/memory/rebuild` | 重建 mem0 长期记忆（需先安装 mem0） |
+| `GET` | `/api/profiles/{id}/memory/search?q=` | 搜索 mem0 长期记忆 |
 | `GET` | `/api/config/status` | LLM Provider 状态（不返回 API Key） |
-| `GET` | `/api/integrations/mineru/status` | MinerU 安装与启用状态 |
-| `GET` | `/profiles/{id}/export/skill-card` | 导出 Skill Card (Markdown) |
-| `GET` | `/profiles/{id}/export/dataset` | 导出 Dataset (JSONL) |
+| `GET` | `/api/integrations/mineru/status` | MinerU 安装、配置与启用状态 |
+| `GET` | `/api/integrations/mem0/status` | mem0 安装与启用状态 |
+| `GET` | `/api/profiles/{id}/export/skill-card` | 导出 Skill Card (SKILL.md) |
+| `GET` | `/api/profiles/{id}/export/dataset` | 导出 RAG Dataset (JSONL) |
+| `GET` | `/api/profiles/{id}/export/sft` | 导出 LLaMA Factory SFT (JSONL) |
 | `GET` | `/api/health` | 健康检查 |
 
 ### 请求/响应示例

@@ -110,6 +110,23 @@ class MineruStatusResponse(BaseModel):
     timeout_seconds: int = 300
 
 
+class Mem0StatusResponse(BaseModel):
+    installed: bool
+    enabled: bool
+    provider: str = "local"
+    error: Optional[str] = None
+
+
+class MemoryRebuildResponse(BaseModel):
+    stored: int
+    error: Optional[str] = None
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(default=5, ge=1, le=20)
+
+
 class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None

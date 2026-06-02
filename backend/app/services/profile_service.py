@@ -328,6 +328,19 @@ async def chat_with_profile(
         if relevant_chunks else "（尚无相关资料）"
     )
 
+    # mem0 long-term memory (optional, silent fallback)
+    mem0_context = ""
+    try:
+        from app.integrations.mem0_adapter import search_memory_sync
+        mem0_results = search_memory_sync(f"profile_{profile_id}", user_message, limit=3)
+        if mem0_results:
+            mem0_context = "长期记忆：\n" + "\n".join(
+                m.get("memory", "") for m in mem0_results if m.get("memory")
+            )
+            retrieved_context = mem0_context + "\n\n" + retrieved_context
+    except Exception:
+        pass  # mem0 is optional — never break chat
+
     # Total chars for context
     total_chars = sum(len(c) for c in chunk_texts)
 
@@ -375,6 +388,22 @@ async def chat_with_profile(
     db.add(assistant_msg)
     db.commit()
 
+    # Store to mem0 long-term memory (optional, silent fallback)
+    try:
+        from app.integrations.mem0_adapter import add_memory_sync
+        add_memory_sync(
+            f"profile_{profile_id}",
+            f"用户问: {user_message[:500]}",
+            metadata={"type": "chat", "role": "user", "mode": mode},
+        )
+        add_memory_sync(
+            f"profile_{profile_id}",
+            f"AI回复: {reply[:500]}",
+            metadata={"type": "chat", "role": "assistant", "profile_name": profile.name, "mode": mode},
+        )
+    except Exception:
+        pass  # mem0 is optional — never break chat
+
     return {
         "reply": reply,
         "retrieved_count": len(relevant_chunks),
@@ -402,17 +431,19 @@ def export_skill_card(db: Session, profile_id: int) -> str:
 
     rel_type = profile.relationship_type or "other"
 
+    skill_md_name = profile.name.replace(" ", "_")
     parts = [
-        f"# {profile.name} 的 AI Skill Card",
+        f"# {skill_md_name}.skill.md",
         "",
-        "> 此文件由 AI Clone 自动生成，可保存为 SKILL.md",
+        f"name: {skill_md_name}",
+        f"target_type: {rel_type}",
+        f"description: AI Clone 自动生成的人物风格卡，基于 {latest.total_chunks} 个文本片段（{latest.total_chars} 字符）分析生成",
+        f"model: {latest.model_used}",
+        f"generated_at: {latest.created_at.isoformat() if latest.created_at else 'unknown'}",
+        f"source: AI Clone (ai-clone)",
         "",
-        f"## 基本信息",
-        f"- 名称：{profile.name}",
-        f"- 关系类型：{rel_type}",
-        f"- 资料数量：{latest.total_chunks} 片段 · {latest.total_chars} 字符",
-        f"- 分析模型：{latest.model_used}",
-        f"- 生成时间：{latest.created_at.isoformat() if latest.created_at else '未知'}",
+        "> 此 SKILL.md 文件由 AI Clone 自动生成，可被 Claude Code / Codex / Cursor 等工具读取作为人物风格说明。",
+        "> 这是基于资料的 AI 模拟角色，不代表本人真实意愿。",
         "",
         "---",
         "",
@@ -431,7 +462,7 @@ def export_skill_card(db: Session, profile_id: int) -> str:
         "## 合规声明",
         "",
         f"- {COMPLIANCE_DISCLAIMER}",
-        "- 本 Skill Card 供了解人物风格使用，不得用于冒充、诈骗等违法用途。",
+        "- 本 SKILL.md 供了解人物风格、辅助工具使用，不得用于冒充、诈骗等违法用途。",
         "- 如涉及他人隐私，请确保已获合法授权。",
     ]
 

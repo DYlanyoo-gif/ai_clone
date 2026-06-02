@@ -7,6 +7,8 @@ import {
   getConfigStatus, exportSkillCard, exportDataset,
   getSufficiency, type DataSufficiency, type ConfigStatus,
   getMineruStatus, type MineruStatus,
+  deleteDocument, previewDocument, rebuildChunks,
+  exportSFT, type DocumentPreview,
 } from '../api/client'
 
 // Parse Markdown into sections by H2 headers
@@ -63,6 +65,11 @@ export default function ProfileDetailPage() {
   const [copied, setCopied] = useState('')
   const [activeSection, setActiveSection] = useState('')
   const [uploadingFileName, setUploadingFileName] = useState('')
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [previewDoc, setPreviewDoc] = useState<DocumentPreview | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [rebuilding, setRebuilding] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchData = useCallback(async () => {
@@ -196,6 +203,86 @@ export default function ProfileDetailPage() {
       a.href = url; a.download = result.filename; a.click()
       URL.revokeObjectURL(url)
       setSuccess(`数据集已导出，共 ${result.total_records} 条记录`)
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setExporting('')
+    }
+  }
+
+  const handleDeleteDocument = async (docId: number) => {
+    try {
+      setDeleting(true)
+      setError('')
+      await deleteDocument(profileId, docId)
+      setSuccess('文档已删除')
+      setDeletingId(null)
+      await fetchData()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const handlePreviewDocument = async (docId: number) => {
+    try {
+      setPreviewLoading(true)
+      setError('')
+      const result = await previewDocument(profileId, docId)
+      setPreviewDoc(result)
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  const handleRebuildChunks = async () => {
+    if (!confirm('确认重建所有文档的文本片段？这不会删除原始文件。')) return
+    try {
+      setRebuilding(true)
+      setError('')
+      const result = await rebuildChunks(profileId)
+      setSuccess(result.message)
+      await fetchData()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setRebuilding(false)
+    }
+  }
+
+  const handleExportSFT = async () => {
+    try {
+      setExporting('sft')
+      setError('')
+      const result = await exportSFT(profileId)
+      const blob = new Blob([result.content], { type: 'application/jsonl;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = result.filename; a.click()
+      URL.revokeObjectURL(url)
+      setSuccess(`SFT 数据集已导出，共 ${result.total_records} 条训练样本`)
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setExporting('')
+    }
+  }
+
+  const handleExportRAGDataset = async () => {
+    try {
+      setExporting('rag')
+      setError('')
+      const result = await exportDataset(profileId)
+      const jsonStr = JSON.stringify(result.records, null, 2)
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = `rag_${result.filename}`; a.click()
+      URL.revokeObjectURL(url)
+      setSuccess(`RAG 数据集已导出，共 ${result.total_records} 条记录`)
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -386,22 +473,60 @@ export default function ProfileDetailPage() {
             </h3>
             {documents.map(doc => (
               <div key={doc.id} className="file-item">
-                <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <span>{doc.filename}</span>
                   {doc.parser && doc.parser !== 'builtin' && (
-                    <span className="badge" style={{ marginLeft: '0.5rem', fontSize: '0.7rem' }}>
+                    <span className="badge" style={{ fontSize: '0.7rem' }}>
                       {doc.parser}
                     </span>
                   )}
                   {doc.parse_status === 'failed' && (
-                    <span className="badge" style={{ marginLeft: '0.5rem', fontSize: '0.7rem', background: '#fef2f2', color: 'var(--c-danger)' }}>
+                    <span className="badge" style={{ fontSize: '0.7rem', background: '#fef2f2', color: 'var(--c-danger)' }}>
                       解析失败
                     </span>
                   )}
+                  <span style={{ color: 'var(--c-text-muted)', fontSize: '0.75rem' }}>
+                    {doc.char_count.toLocaleString()} 字符 · {new Date(doc.uploaded_at).toLocaleDateString('zh-CN')}
+                  </span>
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.25rem' }}>
+                    <button
+                      className="btn-sm"
+                      style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}
+                      onClick={() => handlePreviewDocument(doc.id)}
+                      disabled={previewLoading}
+                    >
+                      预览
+                    </button>
+                    {deletingId === doc.id ? (
+                      <span style={{ fontSize: '0.7rem', display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--c-danger)' }}>确认删除？</span>
+                        <button
+                          className="btn-sm"
+                          style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', background: 'var(--c-danger)', color: '#fff', border: 'none' }}
+                          onClick={() => handleDeleteDocument(doc.id)}
+                          disabled={deleting}
+                        >
+                          {deleting ? '...' : '确认'}
+                        </button>
+                        <button
+                          className="btn-sm"
+                          style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}
+                          onClick={() => setDeletingId(null)}
+                        >
+                          取消
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        className="btn-sm"
+                        style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', color: 'var(--c-danger)' }}
+                        onClick={() => setDeletingId(doc.id)}
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <span style={{ color: 'var(--c-text-muted)', fontSize: '0.8rem' }}>
-                  {doc.char_count.toLocaleString()} 字符 · {new Date(doc.uploaded_at).toLocaleDateString('zh-CN')}
-                </span>
               </div>
             ))}
           </div>
@@ -491,8 +616,8 @@ export default function ProfileDetailPage() {
 
       {/* ── Export ── */}
       <div className="card" style={{ marginTop: '1rem' }}>
-        <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>导出</h2>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+        <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>导出与维护</h2>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
           <button
             className="btn-primary"
             onClick={handleExportSkillCard}
@@ -503,11 +628,29 @@ export default function ProfileDetailPage() {
           </button>
           <button
             className="btn-primary"
-            onClick={handleExportDataset}
-            disabled={profile.chunk_count === 0 || exporting === 'dataset'}
+            onClick={handleExportRAGDataset}
+            disabled={profile.chunk_count === 0 || exporting === 'rag'}
             style={{ fontSize: '0.85rem', background: 'var(--c-text-muted)', borderColor: 'var(--c-text-muted)' }}
           >
-            {exporting === 'dataset' ? <><span className="spinner" /> 导出中</> : '导出 Dataset'}
+            {exporting === 'rag' ? <><span className="spinner" /> 导出中</> : '导出 RAG Dataset'}
+          </button>
+          <button
+            className="btn-primary"
+            onClick={handleExportSFT}
+            disabled={profile.chunk_count === 0 || exporting === 'sft'}
+            style={{ fontSize: '0.85rem', background: '#7c3aed', borderColor: '#7c3aed' }}
+          >
+            {exporting === 'sft' ? <><span className="spinner" /> 导出中</> : '导出 LLaMA Factory SFT'}
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            className="btn-primary"
+            onClick={handleRebuildChunks}
+            disabled={rebuilding || profile.chunk_count === 0}
+            style={{ fontSize: '0.8rem', background: 'transparent', color: 'var(--c-text-muted)', border: '1px solid var(--c-border)' }}
+          >
+            {rebuilding ? <><span className="spinner" /> 重建中</> : '重建文本片段'}
           </button>
         </div>
         {!profile.has_analysis && (
@@ -515,7 +658,74 @@ export default function ProfileDetailPage() {
             Skill Card 需要先生成画像报告和风格卡
           </p>
         )}
+        <p style={{ fontSize: '0.75rem', color: 'var(--c-text-muted)', marginTop: '0.25rem' }}>
+          RAG Dataset = Easy Dataset 兼容 JSONL · SFT Dataset = LLaMA Factory 兼容训练数据
+        </p>
       </div>
+
+      {/* ── Preview Modal ── */}
+      {previewDoc && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000,
+        }} onClick={() => setPreviewDoc(null)}>
+          <div style={{
+            background: 'var(--c-bg)', borderRadius: '8px', padding: '1.5rem',
+            maxWidth: '700px', width: '90%', maxHeight: '80vh', overflow: 'auto',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 style={{ margin: 0, fontSize: '1rem' }}>预览: {previewDoc.filename}</h3>
+              <button onClick={() => setPreviewDoc(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.2rem' }}>✕</button>
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)', marginBottom: '0.5rem' }}>
+              解析器: {previewDoc.parser || '内置'} · 状态: {previewDoc.parse_status || '正常'} · {previewDoc.char_count.toLocaleString()} 字符
+            </div>
+            <pre style={{
+              whiteSpace: 'pre-wrap', fontSize: '0.85rem', lineHeight: 1.6,
+              background: 'var(--c-bg-raised)', padding: '1rem', borderRadius: '6px',
+              maxHeight: '50vh', overflow: 'auto',
+            }}>
+              {previewDoc.preview_text}
+            </pre>
+            {previewDoc.preview_text.length >= 3000 && (
+              <p style={{ fontSize: '0.75rem', color: 'var(--c-text-muted)', marginTop: '0.5rem' }}>
+                仅显示前 3000 字。完整内容请查看原始文件。
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Confirmation Modal ── */}
+      {deletingId && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: 'var(--c-bg)', borderRadius: '8px', padding: '2rem',
+            maxWidth: '400px', textAlign: 'center',
+          }}>
+            <h3 style={{ marginTop: 0 }}>确认删除</h3>
+            <p>删除后将移除该文档及其所有文本片段。原始上传文件保留在磁盘上。</p>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', marginTop: '1rem' }}>
+              <button
+                className="btn-primary"
+                style={{ background: 'var(--c-danger)', borderColor: 'var(--c-danger)' }}
+                onClick={() => handleDeleteDocument(deletingId)}
+                disabled={deleting}
+              >
+                {deleting ? '删除中...' : '确认删除'}
+              </button>
+              <button className="btn-primary" onClick={() => setDeletingId(null)} style={{ background: 'var(--c-text-muted)', borderColor: 'var(--c-text-muted)' }}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

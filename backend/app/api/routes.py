@@ -15,6 +15,7 @@ from app.schemas.models import (
     DocumentResponse, AnalysisResponse,
     ChatRequest, ChatResponse, ChatMessageResponse,
     MessageResponse, ErrorResponse, MineruStatusResponse,
+    Mem0StatusResponse, MemoryRebuildResponse, MemorySearchRequest,
 )
 from app.services.document_processor import parse_file_content
 from app.services.profile_service import (
@@ -23,7 +24,9 @@ from app.services.profile_service import (
 )
 from app.services.llm_provider import get_config_status
 from app.integrations.easy_dataset_adapter import export_chunks_jsonl
+from app.integrations.llamafactory_adapter import export_sft_dataset, export_sft_jsonl
 from app.integrations.mineru_adapter import detect_mineru, parse_with_mineru, MineruStatus
+from app.integrations.mem0_adapter import detect_mem0, rebuild_memories_sync, search_memory_sync
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,20 @@ async def mineru_status():
         table=s.mineru_table,
         image_analysis=s.mineru_image_analysis,
         timeout_seconds=s.mineru_timeout_seconds,
+    )
+
+
+# ── mem0 Integration Status ──
+
+@router.get("/integrations/mem0/status", response_model=Mem0StatusResponse)
+async def mem0_status():
+    """Check whether mem0 is installed, enabled, and configured."""
+    status = detect_mem0()
+    return Mem0StatusResponse(
+        installed=status.installed,
+        enabled=status.enabled,
+        provider=status.provider,
+        error=status.error,
     )
 
 
@@ -377,6 +394,182 @@ async def list_chat_messages(profile_id: int, db: Session = Depends(get_db)):
     return messages
 
 
+# ── Memory (mem0) ──
+
+@router.post("/profiles/{profile_id}/memory/rebuild", response_model=MemoryRebuildResponse)
+async def rebuild_memory(profile_id: int, db: Session = Depends(get_db)):
+    """Rebuild mem0 memories from existing chat history and analysis."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    style_card = ""
+    latest_analysis = (
+        db.query(AnalysisReport)
+        .filter(AnalysisReport.profile_id == profile_id)
+        .order_by(AnalysisReport.created_at.desc())
+        .first()
+    )
+    if latest_analysis:
+        style_card = latest_analysis.style_card or ""
+
+    result = rebuild_memories_sync(profile_id, profile.name, style_card)
+    return MemoryRebuildResponse(stored=result["stored"], error=result["error"])
+
+
+@router.get("/profiles/{profile_id}/memory/search")
+async def search_memory(profile_id: int, q: str = "", limit: int = 5):
+    """Search mem0 memories for a profile."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    if not q.strip():
+        return {"results": [], "query": ""}
+
+    results = search_memory_sync(f"profile_{profile_id}", q, limit)
+    return {"results": results, "query": q, "total": len(results)}
+
+
+# ── Document Management ──
+
+@router.delete("/profiles/{profile_id}/documents/{document_id}")
+async def delete_document(profile_id: int, document_id: int, db: Session = Depends(get_db)):
+    """Delete a document and its chunks. Original uploaded file is preserved on disk
+    (MinerU output files are kept for debugging; only database records are removed)."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    doc = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.profile_id == profile_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    # Delete chunks first (ON DELETE CASCADE handles this, but explicit is safer)
+    db.query(Chunk).filter(Chunk.document_id == document_id).delete()
+    filename = doc.filename
+    db.delete(doc)
+    db.commit()
+
+    logger.info(f"Deleted document {document_id} ({filename}) for profile {profile_id}")
+    return MessageResponse(
+        message="文档已删除",
+        detail=f"已删除文档 \"{filename}\" 及其所有文本片段。原始上传文件保留在磁盘上。",
+    )
+
+
+@router.post("/profiles/{profile_id}/rebuild-chunks")
+async def rebuild_chunks(profile_id: int, db: Session = Depends(get_db)):
+    """Rebuild chunks for all documents in a profile. Useful after MinerU config changes
+    or if chunking parameters need to be re-applied."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    from app.services.document_processor import parse_file_content
+
+    docs = (
+        db.query(Document)
+        .filter(Document.profile_id == profile_id)
+        .all()
+    )
+
+    rebuilt = 0
+    errors = []
+
+    for doc in docs:
+        try:
+            # Delete existing chunks
+            db.query(Chunk).filter(Chunk.document_id == doc.id).delete()
+
+            # Re-parse the stored parsed text path if available, otherwise use existing
+            if doc.parsed_text_path and os.path.isfile(doc.parsed_text_path):
+                with open(doc.parsed_text_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            elif doc.original_file_path and os.path.isfile(doc.original_file_path):
+                with open(doc.original_file_path, "rb") as f:
+                    raw = f.read()
+                text, _ = parse_file_content(raw, doc.filename)
+            else:
+                errors.append(f"{doc.filename}: 原始文件或解析文本路径不可用")
+                continue
+
+            if not text.strip():
+                errors.append(f"{doc.filename}: 解析文本为空")
+                continue
+
+            # Re-chunk using the same logic as process_document_upload
+            from app.services.profile_service import process_document_upload
+            await process_document_upload(
+                db=db,
+                profile_id=profile_id,
+                filename=doc.filename,
+                text=text,
+                parser=doc.parser,
+                parsed_text_path=doc.parsed_text_path,
+                original_file_path=doc.original_file_path,
+                parse_status="success",
+            )
+            rebuilt += 1
+        except Exception as e:
+            errors.append(f"{doc.filename}: {e}")
+
+    msg = f"已重建 {rebuilt} 个文档的文本片段"
+    if errors:
+        msg += f"，{len(errors)} 个失败: {'; '.join(errors[:5])}"
+    return MessageResponse(message="重建完成", detail=msg)
+
+
+@router.get("/profiles/{profile_id}/documents/{document_id}/preview")
+async def preview_document(profile_id: int, document_id: int, db: Session = Depends(get_db)):
+    """Return the first 3000 chars of parsed text for a document preview."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    doc = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.profile_id == profile_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    text = ""
+    source = ""
+
+    # Try parsed text path first (MinerU output)
+    if doc.parsed_text_path and os.path.isfile(doc.parsed_text_path):
+        with open(doc.parsed_text_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(3000)
+        source = "parsed_text"
+    elif doc.original_file_path and os.path.isfile(doc.original_file_path):
+        ext = os.path.splitext(doc.filename)[1].lower()
+        if ext in (".txt", ".md", ".markdown", ".json", ".csv"):
+            with open(doc.original_file_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(3000)
+            source = "original"
+        else:
+            text = f"[二进制文件，无法直接预览。解析器: {doc.parser or '未知'}]"
+            source = "binary"
+    else:
+        text = "[文件路径不可用]"
+        source = "missing"
+
+    return {
+        "document_id": document_id,
+        "filename": doc.filename,
+        "parser": doc.parser,
+        "parse_status": doc.parse_status,
+        "char_count": doc.char_count,
+        "preview_text": text,
+        "source": source,
+    }
+
+
 # ── Export ──
 
 @router.get("/profiles/{profile_id}/export/skill-card")
@@ -417,6 +610,31 @@ async def export_profile_dataset(profile_id: int, db: Session = Depends(get_db))
         "filename": f"dataset_{profile.name}.jsonl",
         "total_records": len(data),
         "records": data,
+    }
+
+
+@router.get("/profiles/{profile_id}/export/sft")
+async def export_profile_sft(profile_id: int, db: Session = Depends(get_db)):
+    """Export chat messages in LLaMA Factory SFT format (messages JSONL)."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    chat_count = db.query(ChatMessage).filter(ChatMessage.profile_id == profile_id).count()
+    if chat_count < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="该人物对话数据不足（需要至少一轮对话）。请先进行几轮聊天后再导出 SFT 数据集。",
+        )
+
+    data = export_sft_jsonl(db, profile_id)
+    return {
+        "profile_id": profile_id,
+        "profile_name": profile.name,
+        "format": "llamafactory_sft_jsonl",
+        "filename": f"sft_{profile.name}.jsonl",
+        "total_records": len(data.split("\n")) if data else 0,
+        "content": data,
     }
 
 
