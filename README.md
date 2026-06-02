@@ -231,27 +231,53 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mineru_windows.ps1
 
 ### 6. （可选）安装 mem0 支持长期记忆
 
-mem0 为 AI 对话提供跨会话的长期记忆层。未安装时，系统使用 SQLite chat_messages 表存储短期历史。
+mem0 为 AI 对话提供跨会话的长期记忆层，让 AI 记住用户的偏好、历史对话要点等。**不是人物分析模型**，而是记忆存储和检索层。未安装时，系统使用 SQLite chat_messages 表存储短期历史。
 
-**安装：**
+**安装步骤：**
 ```bash
+# 1. 安装 mem0ai Python 包
 pip install mem0ai
+
+# 2. 编辑 .env 文件，启用 mem0
+#    将以下内容加入 .env：
+#    MEM0_ENABLED=true
+#    MEM0_PROVIDER=local
+#    MEM0_COLLECTION_PREFIX=ai_clone_profile
+
+# 3. 重启后端
+#    Ctrl+C 停止当前后端，再运行 start_backend.bat
 ```
 
-**启用：** 在 `.env` 中设置：
-```env
-MEM0_ENABLED=true
-MEM0_PROVIDER=local
-MEM0_COLLECTION_PREFIX=ai_clone_profile
+**验证安装：**
+```bash
+# 检查 mem0 状态接口
+curl http://localhost:8000/api/integrations/mem0/status
 ```
 
-**验证：** `GET /api/integrations/mem0/status`
+预期返回：
+```json
+{
+  "installed": true,
+  "enabled": true,
+  "available": true,
+  "provider": "local",
+  "error": null,
+  "detail": "mem0 已安装、已启用、API 可用。"
+}
+```
+
+如果 `available: false`，说明 mem0 API 版本与适配器不兼容。检查 mem0ai 版本：`pip show mem0ai`。
+
+**验收长期记忆：**
+1. 聊天时说："我喜欢直接一点的回答，先给结论再展开。"
+2. 继续聊天几轮，然后问："你还记得我刚才的偏好是什么吗？"
+3. 如果 mem0 已启用且正常，AI 应能提到"直接、先给结论"。
+4. 如果 mem0 不可用，AI 不会崩溃，仅基于当前上下文回答。
 
 **说明：**
-- mem0 不是人物分析模型，而是记忆存储和检索层
 - 人物分析仍由 DeepSeek 完成
 - mem0 调用失败时自动回退到 SQLite，不会导致聊天失败
-- 默认关闭，不影响现有功能
+- 默认关闭（`MEM0_ENABLED=false`），不影响现有功能
 
 ### 7. 导出功能说明
 

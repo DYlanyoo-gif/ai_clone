@@ -113,8 +113,10 @@ class MineruStatusResponse(BaseModel):
 class Mem0StatusResponse(BaseModel):
     installed: bool
     enabled: bool
+    available: bool = False
     provider: str = "local"
     error: Optional[str] = None
+    detail: str = ""
 
 
 class MemoryRebuildResponse(BaseModel):

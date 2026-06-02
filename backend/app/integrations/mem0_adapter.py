@@ -9,26 +9,36 @@ uses SQLite chat_messages for short-term history only.
 
 Install: pip install mem0ai
 Enable:  set MEM0_ENABLED=true in .env
+Verify:  GET /api/integrations/mem0/status
 """
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Known mem0 import paths and class names (API may vary across versions)
+_MEM0_IMPORT_ATTEMPTS = [
+    ("mem0", "Memory"),
+    ("mem0ai", "Memory"),
+    ("mem0", "MemoryClient"),
+    ("mem0ai", "MemoryClient"),
+]
+
 
 @dataclass
 class Mem0Status:
-    installed: bool
-    enabled: bool
+    installed: bool       # package is importable
+    enabled: bool         # MEM0_ENABLED=true in .env
+    available: bool       # installed AND client can be instantiated
     provider: str = "local"
     error: Optional[str] = None
 
 
 def _get_config() -> dict:
-    """Read mem0 config from env, never logging sensitive values."""
+    """Read mem0 config from env."""
     return {
         "enabled": os.getenv("MEM0_ENABLED", "false").lower() in ("1", "true", "yes"),
         "provider": os.getenv("MEM0_PROVIDER", "local"),
@@ -36,42 +46,49 @@ def _get_config() -> dict:
     }
 
 
-def detect_mem0() -> Mem0Status:
-    """Check if mem0 is installed and configured. Never raises."""
-    cfg = _get_config()
+def _try_import_mem0() -> tuple[bool, Optional[str], Optional[type]]:
+    """Try to import mem0 Memory class. Returns (ok, error, Memory_class)."""
+    for module_name, class_name in _MEM0_IMPORT_ATTEMPTS:
+        try:
+            mod = __import__(module_name, fromlist=[class_name])
+            cls = getattr(mod, class_name, None)
+            if cls is not None:
+                return True, None, cls
+        except ImportError:
+            continue
+        except Exception as e:
+            logger.debug(f"mem0 import attempt {module_name}.{class_name}: {e}")
+            continue
+    return False, "mem0ai not installed. Run: pip install mem0ai", None
+
+
+def _try_init_client(memory_cls: type, cfg: dict) -> tuple[bool, Optional[str], Optional[object]]:
+    """Try to instantiate a mem0 Memory client. Returns (ok, error, client)."""
+    # Attempt 1: Memory.from_config(dict)  (mem0 v0.x common pattern)
     try:
-        import mem0  # noqa: F401
-        return Mem0Status(
-            installed=True,
-            enabled=cfg["enabled"],
-            provider=cfg["provider"],
-        )
-    except ImportError:
-        return Mem0Status(
-            installed=False,
-            enabled=False,
-            provider=cfg["provider"],
-            error="mem0ai not installed. Run: pip install mem0ai",
-        )
+        if hasattr(memory_cls, "from_config"):
+            config = {
+                "vector_store": {
+                    "provider": cfg["provider"],
+                    "config": {
+                        "collection_name": cfg["collection_prefix"],
+                    },
+                },
+            }
+            client = memory_cls.from_config(config)
+            return True, None, client
     except Exception as e:
-        logger.warning(f"mem0 detection error: {e}")
-        return Mem0Status(
-            installed=False,
-            enabled=False,
-            provider=cfg["provider"],
-            error=str(e),
-        )
+        logger.debug(f"mem0 from_config failed: {e}")
 
-
-def _get_memory_client():
-    """Get a configured mem0 Memory client, or None if unavailable."""
-    cfg = _get_config()
-    if not cfg["enabled"]:
-        return None
+    # Attempt 2: Memory() with no args (uses env vars)
     try:
-        from mem0 import Memory
-        # Use local provider by default (stores in local SQLite/vector DB)
-        # API keys are read from env by mem0 itself, we never pass them explicitly
+        client = memory_cls()
+        return True, None, client
+    except Exception as e:
+        logger.debug(f"mem0 default init failed: {e}")
+
+    # Attempt 3: Memory(config_dict=...) keyword arg
+    try:
         config = {
             "vector_store": {
                 "provider": cfg["provider"],
@@ -80,13 +97,84 @@ def _get_memory_client():
                 },
             },
         }
-        return Memory.from_config(config)
-    except ImportError:
-        logger.debug("mem0 not installed, using SQLite fallback")
-        return None
+        client = memory_cls(config=config)
+        return True, None, client
     except Exception as e:
-        logger.warning(f"mem0 client init failed, using SQLite fallback: {e}")
+        logger.debug(f"mem0 config= init failed: {e}")
+
+    return False, "mem0 installed but client init failed — API may have changed. Check mem0ai version.", None
+
+
+def detect_mem0() -> Mem0Status:
+    """Check if mem0 is installed, enabled, and API-compatible. Never raises."""
+    cfg = _get_config()
+
+    # Step 1: try import
+    import_ok, import_err, memory_cls = _try_import_mem0()
+    if not import_ok:
+        return Mem0Status(
+            installed=False,
+            enabled=False,
+            available=False,
+            provider=cfg["provider"],
+            error=import_err,
+        )
+
+    # Step 2: try client instantiation
+    init_ok, init_err, _client = _try_init_client(memory_cls, cfg)
+    if not init_ok:
+        return Mem0Status(
+            installed=True,
+            enabled=cfg["enabled"],
+            available=False,
+            provider=cfg["provider"],
+            error=init_err,
+        )
+
+    return Mem0Status(
+        installed=True,
+        enabled=cfg["enabled"],
+        available=True,
+        provider=cfg["provider"],
+    )
+
+
+# Cache the client + init status for the process lifetime
+_client_cache: Optional[object] = None
+_client_init_ok: bool = False
+_client_init_attempted: bool = False
+
+
+def _get_memory_client():
+    """Get a configured mem0 Memory client, or None if unavailable.
+    Caches the result after first attempt so we don't retry imports on every chat turn.
+    """
+    global _client_cache, _client_init_ok, _client_init_attempted
+
+    if _client_init_attempted:
+        return _client_cache if _client_init_ok else None
+
+    _client_init_attempted = True
+    cfg = _get_config()
+
+    if not cfg["enabled"]:
+        logger.debug("mem0: disabled by config (MEM0_ENABLED=false)")
         return None
+
+    import_ok, _import_err, memory_cls = _try_import_mem0()
+    if not import_ok:
+        logger.debug("mem0: not installed")
+        return None
+
+    init_ok, init_err, client = _try_init_client(memory_cls, cfg)
+    if not init_ok:
+        logger.warning(f"mem0: {init_err}")
+        return None
+
+    _client_cache = client
+    _client_init_ok = True
+    logger.info("mem0: client initialized (provider=%s)", cfg["provider"])
+    return client
 
 
 def add_memory_sync(
@@ -103,21 +191,30 @@ def add_memory_sync(
     if client is None:
         return False
     try:
-        # sanitize metadata — never log API keys or full messages
-        safe_meta = {}
+        safe_content = content[:4000] if len(content) > 4000 else content
+        safe_meta: dict = {}
         if metadata:
             safe_meta = {
                 k: (v[:200] if isinstance(v, str) and len(v) > 200 else v)
                 for k, v in metadata.items()
                 if k not in ("api_key", "token", "password", "secret")
             }
-        # Truncate content to avoid storing enormous single memories
-        safe_content = content[:4000] if len(content) > 4000 else content
-        client.add(safe_content, user_id=user_id, metadata=safe_meta)
-        logger.debug(f"mem0: stored memory for user_id={user_id}")
-        return True
+
+        # mem0 API may use add(content, user_id=..., metadata=...) or add(messages=[...])
+        if hasattr(client, "add"):
+            # Try keyword-arg style (common in mem0 v0.x)
+            try:
+                client.add(safe_content, user_id=user_id, metadata=safe_meta)
+            except TypeError:
+                # Maybe it expects a single dict argument
+                client.add({"content": safe_content, "user_id": user_id, "metadata": safe_meta})
+            logger.debug("mem0: add ok user_id=%s", user_id)
+            return True
+
+        logger.debug("mem0: client has no add() method")
+        return False
     except Exception as e:
-        logger.warning(f"mem0 add failed (falling back to SQLite): {e}")
+        logger.warning("mem0 add failed (falling back to SQLite): %s", e)
         return False
 
 
@@ -137,19 +234,26 @@ def search_memory_sync(
         results = client.search(query, user_id=user_id, limit=limit)
         if results is None:
             return []
-        # Normalize results to list of dicts
         if isinstance(results, list):
-            return [
-                {
-                    "id": getattr(r, "id", ""),
-                    "memory": getattr(r, "memory", str(r)),
-                    "score": getattr(r, "score", None),
-                }
-                for r in results
-            ]
+            normalized = []
+            for r in results:
+                if isinstance(r, dict):
+                    normalized.append({
+                        "id": r.get("id", ""),
+                        "memory": r.get("memory", r.get("content", str(r))),
+                        "score": r.get("score"),
+                    })
+                else:
+                    normalized.append({
+                        "id": getattr(r, "id", ""),
+                        "memory": getattr(r, "memory", str(r)),
+                        "score": getattr(r, "score", None),
+                    })
+            logger.debug("mem0: search ok user_id=%s results=%d", user_id, len(normalized))
+            return normalized
         return []
     except Exception as e:
-        logger.warning(f"mem0 search failed (falling back to empty): {e}")
+        logger.warning("mem0 search failed (falling back to empty): %s", e)
         return []
 
 
@@ -159,15 +263,24 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
     Returns {"stored": N, "error": None} or {"stored": 0, "error": "..."}.
     Does NOT raise — failures are reported in the return dict.
     """
+    cfg = _get_config()
+    if not cfg["enabled"]:
+        return {"stored": 0, "error": "mem0 未启用。请在 .env 中设置 MEM0_ENABLED=true 并重启后端。"}
+
     client = _get_memory_client()
     if client is None:
-        return {"stored": 0, "error": "mem0 not available or not enabled"}
+        status = detect_mem0()
+        if not status.installed:
+            return {"stored": 0, "error": "mem0 未安装。请运行: pip install mem0ai"}
+        if not status.available:
+            return {"stored": 0, "error": f"mem0 已安装但不可用: {status.error or 'API 兼容性问题'}"}
+        return {"stored": 0, "error": "mem0 客户端初始化失败"}
 
     try:
         from app.models.session import SessionLocal
-        from app.models.database import ChatMessage, AnalysisReport
+        from app.models.database import ChatMessage
     except ImportError as e:
-        return {"stored": 0, "error": f"Database import failed: {e}"}
+        return {"stored": 0, "error": f"数据库导入失败: {e}"}
 
     user_id = f"profile_{profile_id}"
     stored = 0
@@ -177,44 +290,44 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
         try:
             # Store profile identity
             client.add(
-                f"这是关于 {profile_name} 的 AI 模拟角色的长期记忆。角色基于上传资料生成。",
+                f"AI角色 {profile_name} 的长期记忆初始化。关系类型见metadata。",
                 user_id=user_id,
-                metadata={"type": "identity", "profile_name": profile_name},
+                metadata={"type": "profile_identity", "name": profile_name},
             )
             stored += 1
 
-            # Store style card as memory
+            # Store style card excerpt
             if style_card:
                 client.add(
-                    f"风格卡: {style_card[:3000]}",
+                    style_card[:3000],
                     user_id=user_id,
                     metadata={"type": "style_card"},
                 )
                 stored += 1
 
-            # Store recent chat messages as memories
+            # Replay recent chat messages into mem0
             messages = (
                 db.query(ChatMessage)
                 .filter(ChatMessage.profile_id == profile_id)
                 .order_by(ChatMessage.created_at.desc())
-                .limit(50)
+                .limit(100)
                 .all()
             )
             for msg in reversed(messages):
-                role_label = "用户" if msg.role == "user" else "AI角色"
+                role_prefix = "用户说" if msg.role == "user" else "AI回复"
                 client.add(
-                    f"{role_label}: {msg.content[:2000]}",
+                    f"{role_prefix}: {msg.content[:1500]}",
                     user_id=user_id,
-                    metadata={"type": "chat", "role": msg.role},
+                    metadata={"type": "chat_message", "role": msg.role},
                 )
                 stored += 1
 
-            logger.info(f"mem0: rebuilt {stored} memories for profile {profile_id}")
+            logger.info("mem0: rebuilt %d memories for profile %d", stored, profile_id)
             return {"stored": stored, "error": None}
         finally:
             db.close()
     except Exception as e:
-        logger.warning(f"mem0 rebuild failed: {e}")
+        logger.warning("mem0 rebuild failed for profile %d: %s", profile_id, e)
         return {"stored": stored, "error": str(e)}
 
 

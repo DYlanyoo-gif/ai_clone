@@ -56,6 +56,8 @@ This document honestly tracks every capability module in the AI Clone project, t
 - **默认状态**: 关闭 (MEM0_ENABLED=false)
 - **Fallback**: SQLite chat_messages
 - **依赖**: `pip install mem0ai` (用户手动)
+- **验证**: `GET /api/integrations/mem0/status` → `installed + enabled + available = true`
+- **验收**: 聊天中告诉 AI 偏好 → 几轮后问"我的偏好是什么" → AI 能从长期记忆中检索
 
 ### Easy Dataset
 - **接入方式**: 格式兼容导出，不安装原项目
@@ -75,7 +77,11 @@ This document honestly tracks every capability module in the AI Clone project, t
 2. **MinerU** — Document parsing (via CLI, user-installed)
 
 ### Optional Integration (Install to Enable)
-3. **mem0** — Long-term memory (install: `pip install mem0ai`, set `MEM0_ENABLED=true`)
+3. **mem0** — Long-term memory
+   - Install: `pip install mem0ai`
+   - Enable: set `MEM0_ENABLED=true` in `.env`, restart backend
+   - Verify: `GET /api/integrations/mem0/status` returns `available: true`
+   - Fallback: SQLite chat_messages (always works, no mem0 needed)
 
 ### Format-Compatible Export (No Install Needed)
 4. **Easy Dataset** — RAG dataset JSONL export

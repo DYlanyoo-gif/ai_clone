@@ -184,8 +184,10 @@ export const getMineruStatus = () =>
 export interface Mem0Status {
   installed: boolean;
   enabled: boolean;
+  available: boolean;
   provider: string;
   error: string | null;
+  detail: string;
 }
 export const getMem0Status = () =>
   request<Mem0Status>('/integrations/mem0/status');

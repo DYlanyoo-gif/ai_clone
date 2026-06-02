@@ -328,7 +328,7 @@ async def chat_with_profile(
         if relevant_chunks else "（尚无相关资料）"
     )
 
-    # mem0 long-term memory (optional, silent fallback)
+    # mem0 long-term memory (optional, silent fallback — never breaks chat)
     mem0_context = ""
     try:
         from app.integrations.mem0_adapter import search_memory_sync
@@ -338,8 +338,9 @@ async def chat_with_profile(
                 m.get("memory", "") for m in mem0_results if m.get("memory")
             )
             retrieved_context = mem0_context + "\n\n" + retrieved_context
-    except Exception:
-        pass  # mem0 is optional — never break chat
+            logger.debug("mem0: retrieved %d memories for profile %d", len(mem0_results), profile_id)
+    except Exception as e:
+        logger.debug("mem0 search skipped (profile %d): %s", profile_id, e)
 
     # Total chars for context
     total_chars = sum(len(c) for c in chunk_texts)
@@ -388,7 +389,7 @@ async def chat_with_profile(
     db.add(assistant_msg)
     db.commit()
 
-    # Store to mem0 long-term memory (optional, silent fallback)
+    # Store to mem0 long-term memory (optional, silent fallback — never breaks chat)
     try:
         from app.integrations.mem0_adapter import add_memory_sync
         add_memory_sync(
@@ -401,8 +402,9 @@ async def chat_with_profile(
             f"AI回复: {reply[:500]}",
             metadata={"type": "chat", "role": "assistant", "profile_name": profile.name, "mode": mode},
         )
-    except Exception:
-        pass  # mem0 is optional — never break chat
+        logger.debug("mem0: stored 2 memories for profile %d mode=%s", profile_id, mode)
+    except Exception as e:
+        logger.debug("mem0 store skipped (profile %d): %s", profile_id, e)
 
     return {
         "reply": reply,

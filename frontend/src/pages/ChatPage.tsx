@@ -232,19 +232,24 @@ export default function ChatPage() {
 
               {/* mem0 Status Badge */}
               {mem0Status && (
-                <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <div style={{ marginTop: '0.5rem' }}>
                   <span className={`chat-provider-badge ${
-                    mem0Status.installed && mem0Status.enabled ? 'deepseek' :
-                    mem0Status.installed ? 'mock' : 'mock'
+                    mem0Status.installed && mem0Status.enabled && mem0Status.available ? 'deepseek' :
+                    mem0Status.available ? 'mock' : 'mock'
                   }`}>
-                    {mem0Status.installed && mem0Status.enabled
-                      ? 'mem0 长期记忆已启用'
-                      : mem0Status.installed
-                        ? 'mem0 已安装未启用'
-                        : mem0Status.error
-                          ? `mem0: ${mem0Status.error}`
+                    {mem0Status.installed && mem0Status.enabled && mem0Status.available
+                      ? '长期记忆已启用'
+                      : mem0Status.installed && !mem0Status.available
+                        ? 'mem0 API 不兼容'
+                        : mem0Status.installed && !mem0Status.enabled
+                          ? 'mem0 已安装未启用'
                           : 'mem0 未安装'}
                   </span>
+                  {mem0Status.detail && (
+                    <div style={{ fontSize: '0.7rem', color: 'var(--c-text-muted)', marginTop: '2px' }}>
+                      {mem0Status.detail}
+                    </div>
+                  )}
                 </div>
               )}
 

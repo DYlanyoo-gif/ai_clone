@@ -97,13 +97,24 @@ async def mineru_status():
 
 @router.get("/integrations/mem0/status", response_model=Mem0StatusResponse)
 async def mem0_status():
-    """Check whether mem0 is installed, enabled, and configured."""
+    """Check whether mem0 is installed, enabled, and API-compatible."""
     status = detect_mem0()
+    detail = ""
+    if not status.installed:
+        detail = "mem0 未安装。安装: pip install mem0ai"
+    elif not status.available:
+        detail = "mem0 已安装但客户端初始化失败，可能是 API 版本不兼容。"
+    elif not status.enabled:
+        detail = "mem0 已安装但未启用。在 .env 中设置 MEM0_ENABLED=true 并重启后端。"
+    else:
+        detail = "mem0 已安装、已启用、API 可用。"
     return Mem0StatusResponse(
         installed=status.installed,
         enabled=status.enabled,
+        available=status.available,
         provider=status.provider,
         error=status.error,
+        detail=detail,
     )
 
 
@@ -398,10 +409,19 @@ async def list_chat_messages(profile_id: int, db: Session = Depends(get_db)):
 
 @router.post("/profiles/{profile_id}/memory/rebuild", response_model=MemoryRebuildResponse)
 async def rebuild_memory(profile_id: int, db: Session = Depends(get_db)):
-    """Rebuild mem0 memories from existing chat history and analysis."""
+    """Rebuild mem0 memories from existing chat history and analysis.
+    Requires MEM0_ENABLED=true and mem0 installed."""
     profile = db.query(Profile).filter(Profile.id == profile_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    mem0_status = detect_mem0()
+    if not mem0_status.enabled:
+        return MemoryRebuildResponse(stored=0, error="mem0 未启用。请在 .env 中设置 MEM0_ENABLED=true 并重启后端。")
+    if not mem0_status.installed:
+        return MemoryRebuildResponse(stored=0, error="mem0 未安装。请运行: pip install mem0ai")
+    if not mem0_status.available:
+        return MemoryRebuildResponse(stored=0, error=f"mem0 已安装但不可用: {mem0_status.error}")
 
     style_card = ""
     latest_analysis = (
@@ -419,15 +439,25 @@ async def rebuild_memory(profile_id: int, db: Session = Depends(get_db)):
 
 @router.get("/profiles/{profile_id}/memory/search")
 async def search_memory(profile_id: int, q: str = "", limit: int = 5):
-    """Search mem0 memories for a profile."""
+    """Search mem0 memories for a profile.
+    Returns clear messages when mem0 is not available."""
     profile = db.query(Profile).filter(Profile.id == profile_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    mem0_status = detect_mem0()
+    if not mem0_status.enabled:
+        return {"results": [], "query": q, "total": 0, "status": "mem0 未启用。请在 .env 中设置 MEM0_ENABLED=true。"}
+    if not mem0_status.installed:
+        return {"results": [], "query": q, "total": 0, "status": "mem0 未安装。请运行: pip install mem0ai"}
+    if not mem0_status.available:
+        return {"results": [], "query": q, "total": 0, "status": f"mem0 不可用: {mem0_status.error}"}
+
     if not q.strip():
-        return {"results": [], "query": ""}
+        return {"results": [], "query": "", "total": 0, "status": "ok"}
 
     results = search_memory_sync(f"profile_{profile_id}", q, limit)
-    return {"results": results, "query": q, "total": len(results)}
+    return {"results": results, "query": q, "total": len(results), "status": "ok"}
 
 
 # ── Document Management ──

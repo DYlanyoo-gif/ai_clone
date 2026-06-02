@@ -67,9 +67,10 @@ export default function HomePage() {
     {
       name: 'mem0',
       project: 'mem0ai/mem0',
-      status: mem0?.installed && mem0?.enabled ? 'enabled'
+      status: mem0?.installed && mem0?.enabled && mem0?.available ? 'enabled'
+        : mem0?.installed && !mem0?.available ? 'not_installed'
         : mem0?.installed ? 'installed_disabled' : 'not_installed',
-      desc: '长期记忆层 — 可选，未安装时使用 SQLite',
+      desc: mem0?.detail || '长期记忆层 — 可选，未安装时使用 SQLite',
     },
     {
       name: 'Easy Dataset',
