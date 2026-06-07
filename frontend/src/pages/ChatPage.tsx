@@ -5,6 +5,7 @@ import {
   getProfile, sendMessage, listChatMessages, type Profile, type ChatMessage,
   getConfigStatus, getSufficiency, type ConfigStatus, type DataSufficiency,
   getMem0Status, type Mem0Status,
+  getVectorStatus, type VectorStatus,
   type ChatMode,
 } from '../api/client'
 
@@ -47,6 +48,8 @@ export default function ChatPage() {
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null)
   const [sufficiency, setSufficiency] = useState<DataSufficiency | null>(null)
   const [mem0Status, setMem0Status] = useState<Mem0Status | null>(null)
+  const [vectorStatus, setVectorStatus] = useState<VectorStatus | null>(null)
+  const [lastRetrievalMethod, setLastRetrievalMethod] = useState<'vector' | 'keyword' | ''>('')
   const [mode, setMode] = useState<ChatMode>('daily_chat')
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -58,18 +61,20 @@ export default function ChatPage() {
     if (!isValidId) return
     try {
       setLoading(true)
-      const [p, msgs, cfg, suff, m0] = await Promise.all([
+      const [p, msgs, cfg, suff, m0, vector] = await Promise.all([
         getProfile(profileId),
         listChatMessages(profileId),
         getConfigStatus().catch(() => null),
         getSufficiency(profileId).catch(() => null),
         getMem0Status().catch(() => null),
+        getVectorStatus(profileId).catch(() => null),
       ])
       setProfile(p)
       setMessages(msgs)
       setConfigStatus(cfg)
       setSufficiency(suff)
       setMem0Status(m0)
+      setVectorStatus(vector)
     } catch (e: any) {
       setError(`请求人物 ${profileId} 失败: ${e.message}`)
     } finally {
@@ -102,6 +107,7 @@ export default function ChatPage() {
     try {
       setSending(true)
       const result = await sendMessage(profileId, text, mode)
+      setLastRetrievalMethod(result.retrieval_method || '')
       const assistantMsg: ChatMessage = {
         id: Date.now() + 1,
         profile_id: profileId,
@@ -181,9 +187,17 @@ export default function ChatPage() {
   const isLowData = sufficiency && (sufficiency.level === 'none' || sufficiency.level === 'very_low')
 
   return (
-    <div>
-      <div className="disclaimer">
-        <strong>重要声明：</strong>此 AI 角色是基于资料生成的模拟，并非本人意识，不代表本人真实意愿。
+    <div className="fade-in">
+      <div className="page-header">
+        <div>
+          <h1>人物模拟实验台</h1>
+          <p>基于资料检索、画像风格卡和聊天模式进行受控模拟。</p>
+        </div>
+        <Link to={`/profiles/${profile.id}`} className="btn-secondary">返回档案详情</Link>
+      </div>
+
+      <div className="warning-panel">
+        <strong>合规边界：</strong>此 AI 角色是基于资料生成的模拟，并非本人意识，不代表本人真实意愿。
         对话中 AI 不会冒充真人、不会生成欺骗性内容、不会伪造授权或做出法律/医疗/财务决定。
       </div>
 
@@ -193,27 +207,34 @@ export default function ChatPage() {
           <div className="card">
             <div className="profile-summary">
               <h3>{profile.name}</h3>
-              <p style={{ color: 'var(--c-text-muted)', fontSize: '0.8rem', marginBottom: '0.5rem' }}>
+              <p style={{ color: 'var(--muted)', fontSize: '0.86rem', marginBottom: '0.75rem' }}>
                 {profile.description || '暂无描述'}
               </p>
-              <p><strong>关系：</strong>{relationshipLabel(profile.relationship_type)}</p>
-              <p><strong>资料：</strong>{profile.document_count} 文件 · {profile.chunk_count} 片段 · {profile.total_chars?.toLocaleString() || 0} 字</p>
+              <div className="status-row">
+                <span className="badge">{relationshipLabel(profile.relationship_type)}</span>
+                <span className={profile.has_analysis ? 'badge badge-success' : 'badge badge-muted'}>
+                  {profile.has_analysis ? '有画像' : '未分析'}
+                </span>
+              </div>
+              <div className="quality-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.5rem', marginTop: '0.85rem' }}>
+                <div className="metric-card">
+                  <div className="metric-label">Files</div>
+                  <div className="metric-value">{profile.document_count}</div>
+                </div>
+                <div className="metric-card">
+                  <div className="metric-label">Chunks</div>
+                  <div className="metric-value">{profile.chunk_count}</div>
+                </div>
+              </div>
 
               {/* Data Sufficiency */}
               {sufficiency && (
-                <div style={{ marginTop: '0.5rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>可模拟程度：</span>
-                    <span style={{
-                      fontSize: '0.8rem',
-                      color: sufficiency.level === 'high' ? 'var(--c-success)' :
-                             sufficiency.level === 'medium' ? '#3b82f6' :
-                             sufficiency.level === 'low' ? 'var(--c-warning)' : 'var(--c-danger)'
-                    }}>
-                      {sufficiency.label}
-                    </span>
-                  </div>
+                <div style={{ marginTop: '0.85rem' }}>
                   <div className="sufficiency-bar" style={{ marginTop: '0.25rem' }}>
+                    <div className="sufficiency-head">
+                      <span>资料充分度</span>
+                      <span>{sufficiency.label}</span>
+                    </div>
                     <div className="bar-track">
                       <div className={`bar-fill ${sufficiency.level}`} />
                     </div>
@@ -224,8 +245,8 @@ export default function ChatPage() {
               {/* Provider Badge */}
               {configStatus && (
                 <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <span className={`chat-provider-badge ${configStatus.is_mock ? 'mock' : 'deepseek'}`}>
-                    {configStatus.is_mock ? 'Mock 演示模式' : 'DeepSeek API 已启用'}
+                  <span className={`badge chat-provider-badge ${configStatus.is_mock ? 'mock' : 'deepseek'}`}>
+                    Provider · {configStatus.is_mock ? 'Mock 演示' : configStatus.llm_provider}
                   </span>
                 </div>
               )}
@@ -233,7 +254,7 @@ export default function ChatPage() {
               {/* mem0 Status Badge */}
               {mem0Status && (
                 <div style={{ marginTop: '0.5rem' }}>
-                  <span className={`chat-provider-badge ${
+                  <span className={`badge chat-provider-badge ${
                     mem0Status.installed && mem0Status.enabled && mem0Status.available ? 'deepseek' :
                     mem0Status.available ? 'mock' : 'mock'
                   }`}>
@@ -246,28 +267,45 @@ export default function ChatPage() {
                           : 'mem0 未安装'}
                   </span>
                   {mem0Status.detail && (
-                    <div style={{ fontSize: '0.7rem', color: 'var(--c-text-muted)', marginTop: '2px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginTop: '0.35rem' }}>
                       {mem0Status.detail}
                     </div>
                   )}
                 </div>
               )}
 
+              {/* RAG Retrieval Status */}
+              {vectorStatus && (
+                <div className="subtle-panel retrieval-mini">
+                  <div className="sufficiency-head" style={{ marginBottom: '0.35rem' }}>
+                    <span>RAG 检索方式</span>
+                    <span className={vectorStatus.available ? 'badge badge-success' : 'badge badge-muted'}>
+                      {vectorStatus.available ? 'vector' : 'keyword'}
+                    </span>
+                  </div>
+                  <p style={{ color: 'var(--muted)', fontSize: '0.75rem' }}>
+                    {vectorStatus.available
+                      ? `${vectorStatus.provider} · ${vectorStatus.embedding_model}`
+                      : '当前使用关键词 fallback。启用向量检索后，可提升资料相关问题的证据命中质量。'}
+                  </p>
+                  <p style={{ color: 'var(--muted)', fontSize: '0.72rem', marginTop: '0.3rem' }}>
+                    Collection: {vectorStatus.collection || '未建立'} · {vectorStatus.points_count || 0} points
+                  </p>
+                  {lastRetrievalMethod && (
+                    <span className="badge badge-info">上次回复: {lastRetrievalMethod}</span>
+                  )}
+                </div>
+              )}
+
               {/* Current mode display */}
-              <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--c-border)', paddingTop: '0.75rem' }}>
+              <div className="subtle-panel" style={{ marginTop: '0.85rem' }}>
                 <p style={{ fontSize: '0.8rem' }}>
                   <strong>当前模式：</strong>{MODE_OPTIONS.find(m => m.value === mode)?.label}
                 </p>
-                <p style={{ fontSize: '0.7rem', color: 'var(--c-text-muted)' }}>
+                <p style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
                   {MODE_OPTIONS.find(m => m.value === mode)?.desc}
                 </p>
               </div>
-
-              <p style={{ marginTop: '0.75rem' }}>
-                <Link to={`/profiles/${profile.id}`} style={{ fontSize: '0.8rem' }}>
-                  ← 返回详情页（上传/分析）
-                </Link>
-              </p>
 
               {/* Low data warning */}
               {isLowData && (
@@ -347,12 +385,13 @@ export default function ChatPage() {
             <div ref={messagesEndRef} />
           </div>
           <div className="chat-input-area">
-            <input
+            <textarea
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="输入消息，按 Enter 发送...（Shift+Enter 换行）"
+              placeholder="输入消息，Enter 发送，Shift+Enter 换行"
               disabled={sending}
+              rows={3}
             />
             <button className="btn-primary" onClick={handleSend} disabled={sending || !input.trim()}>
               发送

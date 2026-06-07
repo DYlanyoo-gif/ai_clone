@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
 
     # Model selection: analysis model (portrait + style card) and chat model
+    llm_model_name: str = ""  # legacy compatibility; analysis/chat model fields are preferred
     analysis_model: str = "deepseek-chat"
     chat_model: str = "deepseek-chat"
 
@@ -29,6 +30,20 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_api_key: str = ""
     embedding_model_name: str = "text-embedding-3-small"
+
+    # Optional vector retrieval (Qdrant local + FastEmbed)
+    vector_enabled: bool = False
+    vector_provider: str = "qdrant"
+    vector_embedding_provider: str = "fastembed"
+    vector_embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    vector_collection_prefix: str = "ai_clone_profile"
+    vector_qdrant_path: str = "../data/qdrant"
+    vector_top_k: int = 8
+
+    # mem0 optional memory configuration (kept optional, not product mainline)
+    mem0_enabled: bool = False
+    mem0_provider: str = "local"
+    mem0_collection_prefix: str = "ai_clone_profile"
 
     # MinerU document parsing
     mineru_enabled: bool = True

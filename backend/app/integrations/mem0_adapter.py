@@ -10,6 +10,13 @@ uses SQLite chat_messages for short-term history only.
 Install: pip install mem0ai
 Enable:  set MEM0_ENABLED=true in .env
 Verify:  GET /api/integrations/mem0/status
+
+mem0ai 2.0.4 requires:
+  - A vector store (Qdrant local mode works out of the box)
+  - An LLM (DeepSeek is supported)
+  - An embedding service (OpenAI API Key required — DeepSeek does NOT provide embeddings)
+If any piece is missing, mem0 returns available=false with a specific error message.
+The project falls back to SQLite chat_messages automatically.
 """
 
 import logging
@@ -18,14 +25,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-
-# Known mem0 import paths and class names (API may vary across versions)
-_MEM0_IMPORT_ATTEMPTS = [
-    ("mem0", "Memory"),
-    ("mem0ai", "Memory"),
-    ("mem0", "MemoryClient"),
-    ("mem0ai", "MemoryClient"),
-]
 
 
 @dataclass
@@ -37,6 +36,15 @@ class Mem0Status:
     error: Optional[str] = None
 
 
+# ── Module-level cache — client is created ONCE per process ──
+# Multiple Qdrant instances on the same path cause file-lock conflicts on Windows.
+_client: Optional[object] = None
+_init_ok: bool = False
+_init_error: Optional[str] = None
+_init_attempted: bool = False
+_imported_class: Optional[type] = None
+
+
 def _get_config() -> dict:
     """Read mem0 config from env."""
     return {
@@ -46,135 +54,152 @@ def _get_config() -> dict:
     }
 
 
-def _try_import_mem0() -> tuple[bool, Optional[str], Optional[type]]:
-    """Try to import mem0 Memory class. Returns (ok, error, Memory_class)."""
-    for module_name, class_name in _MEM0_IMPORT_ATTEMPTS:
+# ── Single initialization path (used by both detect_mem0 and _get_memory_client) ──
+
+def _ensure_initialized() -> tuple[bool, Optional[object], Optional[str]]:
+    """Initialize mem0 client if not already done. Caches result globally.
+    Returns (ok, client_or_None, error_or_None).
+    """
+    global _client, _init_ok, _init_error, _init_attempted, _imported_class
+
+    if _init_attempted:
+        return _init_ok, _client, _init_error
+
+    _init_attempted = True
+    cfg = _get_config()
+
+    # Step 1: import
+    for module_name, class_name in [("mem0", "Memory"), ("mem0", "MemoryClient")]:
         try:
             mod = __import__(module_name, fromlist=[class_name])
-            cls = getattr(mod, class_name, None)
-            if cls is not None:
-                return True, None, cls
+            _imported_class = getattr(mod, class_name, None)
+            if _imported_class is not None:
+                break
         except ImportError:
             continue
         except Exception as e:
-            logger.debug(f"mem0 import attempt {module_name}.{class_name}: {e}")
+            logger.debug("mem0 import %s.%s: %s", module_name, class_name, e)
             continue
-    return False, "mem0ai not installed. Run: pip install mem0ai", None
 
+    if _imported_class is None:
+        _init_error = "mem0ai not installed. Run: pip install mem0ai"
+        return False, None, _init_error
 
-def _try_init_client(memory_cls: type, cfg: dict) -> tuple[bool, Optional[str], Optional[object]]:
-    """Try to instantiate a mem0 Memory client. Returns (ok, error, client)."""
-    # Attempt 1: Memory.from_config(dict)  (mem0 v0.x common pattern)
-    try:
-        if hasattr(memory_cls, "from_config"):
-            config = {
-                "vector_store": {
-                    "provider": cfg["provider"],
-                    "config": {
-                        "collection_name": cfg["collection_prefix"],
-                    },
-                },
-            }
-            client = memory_cls.from_config(config)
-            return True, None, client
-    except Exception as e:
-        logger.debug(f"mem0 from_config failed: {e}")
+    # Step 2: build config and instantiate
+    data_dir = os.path.abspath(os.path.join(os.getcwd(), "..", "data"))
+    os.makedirs(data_dir, exist_ok=True)
+    llm_api_key = os.getenv("LLM_API_KEY", "")
+    # Embeddings MUST use a real OpenAI-compatible embedding key.
+    # DeepSeek API key does NOT work for OpenAI embeddings (different service).
+    # Do NOT fall back to LLM_API_KEY — causes 401 errors at runtime.
+    embedding_api_key = os.getenv("OPENAI_API_KEY", "") or os.getenv("EMBEDDING_API_KEY", "")
+    embedding_base_url = os.getenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 
-    # Attempt 2: Memory() with no args (uses env vars)
-    try:
-        client = memory_cls()
-        return True, None, client
-    except Exception as e:
-        logger.debug(f"mem0 default init failed: {e}")
+    # Attempt: from_config with Qdrant local + DeepSeek LLM + OpenAI embedder
+    # Check preconditions before attempting init (so available=false is immediate)
+    if not embedding_api_key:
+        _init_error = (
+            "mem0 2.0.4 需要 OpenAI API Key 用于向量嵌入（DeepSeek 不提供 embeddings API）。"
+            "请在 .env 中设置 OPENAI_API_KEY=sk-... 并重启后端。"
+        )
+        return False, None, _init_error
 
-    # Attempt 3: Memory(config_dict=...) keyword arg
-    try:
-        config = {
+    if hasattr(_imported_class, "from_config"):
+        config_dict = {
             "vector_store": {
-                "provider": cfg["provider"],
+                "provider": "qdrant",
                 "config": {
                     "collection_name": cfg["collection_prefix"],
+                    "path": os.path.join(data_dir, "mem0_qdrant"),
+                    "on_disk": True,
+                    "embedding_model_dims": 1536,
                 },
             },
+            "llm": {
+                "provider": "deepseek",
+                "config": {
+                    "model": os.getenv("ANALYSIS_MODEL", "deepseek-chat"),
+                    "api_key": llm_api_key,
+                },
+            },
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                    "api_key": embedding_api_key,
+                    "openai_base_url": embedding_base_url,
+                },
+            },
+            "history_db_path": os.path.join(data_dir, "mem0_history.db"),
         }
-        client = memory_cls(config=config)
-        return True, None, client
+        try:
+            _client = _imported_class.from_config(config_dict)
+            _init_ok = True
+            logger.info("mem0: client initialized — qdrant+deepseek+openai-embeddings")
+            return True, _client, None
+        except Exception as e:
+            err_str = str(e)
+            if any(kw in err_str.lower() for kw in ("api_key", "openai", "credential", "embed")):
+                _init_error = (
+                    "mem0 2.0.4 缺少 embedding 服务：需要 OpenAI API Key 用于向量嵌入。"
+                    "请设置环境变量 OPENAI_API_KEY（推荐），或 EMBEDDING_API_KEY。"
+                    f"（原始错误: {err_str[:150]}）"
+                )
+                return False, None, _init_error
+            # Other config error — e.g. missing model, vector store path issue
+            _init_error = f"mem0 初始化失败: {err_str[:300]}"
+            return False, None, _init_error
+
+    # Attempt: MemoryClient with API key (mem0 cloud)
+    try:
+        mem0_api_key = os.getenv("MEM0_API_KEY", "")
+        if mem0_api_key:
+            _client = _imported_class(api_key=mem0_api_key)
+            _init_ok = True
+            logger.info("mem0: client initialized — cloud MemoryClient")
+            return True, _client, None
     except Exception as e:
-        logger.debug(f"mem0 config= init failed: {e}")
+        logger.debug("mem0 cloud init failed: %s", e)
 
-    return False, "mem0 installed but client init failed — API may have changed. Check mem0ai version.", None
+    _init_error = (
+        "mem0 2.0.4 初始化失败：缺少 embedding 服务。"
+        "mem0 需要 OpenAI API Key（用于向量嵌入），DeepSeek 不提供此服务。"
+        "解决方案: 在 .env 中设置 OPENAI_API_KEY=sk-... 并重启后端。"
+    )
+    return False, None, _init_error
 
+
+# ── Public API ──
 
 def detect_mem0() -> Mem0Status:
     """Check if mem0 is installed, enabled, and API-compatible. Never raises."""
     cfg = _get_config()
 
-    # Step 1: try import
-    import_ok, import_err, memory_cls = _try_import_mem0()
-    if not import_ok:
-        return Mem0Status(
-            installed=False,
-            enabled=False,
-            available=False,
-            provider=cfg["provider"],
-            error=import_err,
-        )
+    # Force re-init for status checks (so users see fresh results after config changes)
+    # Only force if not already attempted to avoid Qdrant lock issues on repeated calls
+    ok, _client_ref, error = _ensure_initialized()
 
-    # Step 2: try client instantiation
-    init_ok, init_err, _client = _try_init_client(memory_cls, cfg)
-    if not init_ok:
-        return Mem0Status(
-            installed=True,
-            enabled=cfg["enabled"],
-            available=False,
-            provider=cfg["provider"],
-            error=init_err,
-        )
+    if not _init_attempted:
+        # Should not happen — _ensure_initialized always sets _init_attempted
+        return Mem0Status(installed=False, enabled=False, available=False, provider=cfg["provider"],
+                          error="Internal error: init not attempted")
+
+    installed = _imported_class is not None
 
     return Mem0Status(
-        installed=True,
+        installed=installed,
         enabled=cfg["enabled"],
-        available=True,
+        available=ok,
         provider=cfg["provider"],
+        error=error if not ok else None,
     )
 
 
-# Cache the client + init status for the process lifetime
-_client_cache: Optional[object] = None
-_client_init_ok: bool = False
-_client_init_attempted: bool = False
-
-
 def _get_memory_client():
-    """Get a configured mem0 Memory client, or None if unavailable.
-    Caches the result after first attempt so we don't retry imports on every chat turn.
-    """
-    global _client_cache, _client_init_ok, _client_init_attempted
-
-    if _client_init_attempted:
-        return _client_cache if _client_init_ok else None
-
-    _client_init_attempted = True
-    cfg = _get_config()
-
-    if not cfg["enabled"]:
-        logger.debug("mem0: disabled by config (MEM0_ENABLED=false)")
-        return None
-
-    import_ok, _import_err, memory_cls = _try_import_mem0()
-    if not import_ok:
-        logger.debug("mem0: not installed")
-        return None
-
-    init_ok, init_err, client = _try_init_client(memory_cls, cfg)
-    if not init_ok:
-        logger.warning(f"mem0: {init_err}")
-        return None
-
-    _client_cache = client
-    _client_init_ok = True
-    logger.info("mem0: client initialized (provider=%s)", cfg["provider"])
-    return client
+    """Get the cached mem0 Memory client, or None if unavailable."""
+    if not _init_attempted:
+        _ensure_initialized()
+    return _client if _init_ok else None
 
 
 def add_memory_sync(
@@ -183,8 +208,6 @@ def add_memory_sync(
     metadata: Optional[dict] = None,
 ) -> bool:
     """Store a memory entry synchronously. Returns True on success.
-
-    user_id uses the format "profile_{profile_id}" to scope memories.
     Falls back silently on any error — never breaks the chat flow.
     """
     client = _get_memory_client()
@@ -199,20 +222,12 @@ def add_memory_sync(
                 for k, v in metadata.items()
                 if k not in ("api_key", "token", "password", "secret")
             }
-
-        # mem0 API may use add(content, user_id=..., metadata=...) or add(messages=[...])
-        if hasattr(client, "add"):
-            # Try keyword-arg style (common in mem0 v0.x)
-            try:
-                client.add(safe_content, user_id=user_id, metadata=safe_meta)
-            except TypeError:
-                # Maybe it expects a single dict argument
-                client.add({"content": safe_content, "user_id": user_id, "metadata": safe_meta})
-            logger.debug("mem0: add ok user_id=%s", user_id)
-            return True
-
-        logger.debug("mem0: client has no add() method")
-        return False
+        try:
+            client.add(safe_content, user_id=user_id, metadata=safe_meta)
+        except TypeError:
+            client.add({"content": safe_content, "user_id": user_id, "metadata": safe_meta})
+        logger.debug("mem0: add ok user_id=%s", user_id)
+        return True
     except Exception as e:
         logger.warning("mem0 add failed (falling back to SQLite): %s", e)
         return False
@@ -224,14 +239,18 @@ def search_memory_sync(
     limit: int = 5,
 ) -> list[dict]:
     """Search memories for a user synchronously. Returns list of memory entries.
-
     Falls back to empty list on any error — never breaks the chat flow.
     """
     client = _get_memory_client()
     if client is None:
         return []
     try:
-        results = client.search(query, user_id=user_id, limit=limit)
+        # mem0 v2.x search() uses filters=, not user_id= directly
+        try:
+            results = client.search(query, user_id=user_id, limit=limit)
+        except TypeError:
+            # mem0 v2.0.4+: user_id moved to filters
+            results = client.search(query, filters={"user_id": user_id}, limit=limit)
         if results is None:
             return []
         if isinstance(results, list):
@@ -273,7 +292,7 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
         if not status.installed:
             return {"stored": 0, "error": "mem0 未安装。请运行: pip install mem0ai"}
         if not status.available:
-            return {"stored": 0, "error": f"mem0 已安装但不可用: {status.error or 'API 兼容性问题'}"}
+            return {"stored": 0, "error": f"mem0 已安装但不可用: {status.error or '未知错误'}"}
         return {"stored": 0, "error": "mem0 客户端初始化失败"}
 
     try:
@@ -288,15 +307,13 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
     try:
         db = SessionLocal()
         try:
-            # Store profile identity
             client.add(
-                f"AI角色 {profile_name} 的长期记忆初始化。关系类型见metadata。",
+                f"AI角色 {profile_name} 的长期记忆初始化。",
                 user_id=user_id,
                 metadata={"type": "profile_identity", "name": profile_name},
             )
             stored += 1
 
-            # Store style card excerpt
             if style_card:
                 client.add(
                     style_card[:3000],
@@ -305,7 +322,6 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
                 )
                 stored += 1
 
-            # Replay recent chat messages into mem0
             messages = (
                 db.query(ChatMessage)
                 .filter(ChatMessage.profile_id == profile_id)
@@ -331,13 +347,11 @@ def rebuild_memories_sync(profile_id: int, profile_name: str, style_card: str = 
         return {"stored": stored, "error": str(e)}
 
 
-# ── Async wrappers for FastAPI compatibility ──
+# ── Async wrappers ──
 
 async def add_memory(user_id: str, content: str, metadata: dict = None) -> bool:
-    """Async wrapper around add_memory_sync."""
     return add_memory_sync(user_id, content, metadata)
 
 
 async def search_memory(user_id: str, query: str, limit: int = 5) -> list[dict]:
-    """Async wrapper around search_memory_sync."""
     return search_memory_sync(user_id, query, limit)

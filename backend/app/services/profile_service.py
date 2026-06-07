@@ -13,6 +13,7 @@ from app.services.document_processor import (
 )
 from app.skill_templates import get_template, safe_format_template
 from app.skill_templates.base import CHAT_MODE_INSTRUCTIONS, COMPLIANCE_STATEMENT
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ async def process_document_upload(
     db.add(doc)
     db.flush()
 
+    stored_chunks: list[Chunk] = []
     for i, chunk_content in enumerate(unique_chunks):
         chunk = Chunk(
             document_id=doc.id,
@@ -105,11 +107,37 @@ async def process_document_upload(
             chunk_index=i,
             content=chunk_content,
             char_count=len(chunk_content),
+            parser=parser,
         )
         db.add(chunk)
+        stored_chunks.append(chunk)
 
+    db.flush()
     db.commit()
     logger.info(f"Processed document '{filename}' for profile {profile_id}: {len(unique_chunks)} chunks stored")
+
+    try:
+        from app.integrations.vector_adapter import index_chunks
+
+        vector_chunks = [
+            {
+                "chunk_id": chunk.id,
+                "document_id": doc.id,
+                "profile_id": profile_id,
+                "filename": filename,
+                "chunk_index": chunk.chunk_index,
+                "parser": parser,
+                "char_count": chunk.char_count,
+                "created_at": chunk.created_at.isoformat() if chunk.created_at else "",
+                "content": chunk.content,
+            }
+            for chunk in stored_chunks
+        ]
+        result = index_chunks(profile_id, vector_chunks)
+        if result.get("indexed"):
+            logger.info("Vector indexed %s chunks for profile %s document %s", result["indexed"], profile_id, doc.id)
+    except Exception as e:
+        logger.warning("Vector indexing skipped for profile=%s document=%s: %s", profile_id, doc.id, e)
 
     return {
         "document_id": doc.id,
@@ -121,6 +149,180 @@ async def process_document_upload(
 
 # ── Analysis Report Generation ──
 
+def _parse_evidence_map(raw: str) -> str:
+    """Extract evidence_map JSON from LLM response.
+    Expects format: Markdown report followed by === then JSON evidence_map."""
+    if not raw:
+        return ""
+    # Split on === (on its own line)
+    parts = raw.split("\n===\n")
+    if len(parts) < 2:
+        # Try alternative: search for last JSON object
+        import re
+        # Find the last { } block that contains "module_name"
+        matches = list(re.finditer(r'\{[^{}]*"module_name"[^{}]*\}', raw))
+        if matches:
+            # Not a full evidence_map, but partial
+            pass
+        return ""
+    json_part = parts[-1].strip()
+    # Strip code fences if present
+    if json_part.startswith("```"):
+        lines = json_part.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        json_part = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(json_part)
+        return json.dumps(parsed, ensure_ascii=False)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse evidence_map JSON from LLM response")
+        return ""
+
+
+def _portrait_md_from_raw(raw: str) -> str:
+    """Extract the Markdown portrait from LLM response (before === separator)."""
+    if not raw:
+        return ""
+    parts = raw.split("\n===\n")
+    return parts[0].strip()
+
+
+def _chunk_to_result(chunk: Chunk, filename: str = "", parser: str | None = None, score: float = 0.0) -> dict:
+    return {
+        "content": chunk.content,
+        "score": score,
+        "similarity_score": None,
+        "retrieval_method": "keyword",
+        "profile_id": chunk.profile_id,
+        "document_id": chunk.document_id,
+        "chunk_id": chunk.id,
+        "filename": filename,
+        "chunk_index": chunk.chunk_index,
+        "parser": parser or chunk.parser or "builtin",
+        "char_count": chunk.char_count,
+    }
+
+
+def _search_chunks_keyword(db: Session, profile_id: int, query: str, top_k: int) -> list[dict]:
+    rows = (
+        db.query(Chunk, Document.filename, Document.parser)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .all()
+    )
+    if not rows:
+        return []
+    chunk_texts = [row[0].content for row in rows]
+    scored = search_chunks_local(query, chunk_texts, top_k=top_k)
+    by_content: dict[str, list[tuple[Chunk, str, str | None]]] = {}
+    for chunk, filename, parser in rows:
+        by_content.setdefault(chunk.content, []).append((chunk, filename, parser))
+
+    results = []
+    used_ids = set()
+    for item in scored:
+        candidates = by_content.get(item["content"], [])
+        selected = next((c for c in candidates if c[0].id not in used_ids), None)
+        if not selected:
+            continue
+        chunk, filename, parser = selected
+        used_ids.add(chunk.id)
+        results.append(_chunk_to_result(chunk, filename, parser, float(item.get("score", 0.0))))
+    return results
+
+
+def search_relevant_chunks(db: Session, profile_id: int, query: str, top_k: int | None = None) -> tuple[list[dict], str]:
+    """Vector-first retrieval with keyword fallback."""
+    limit = top_k or get_settings().vector_top_k
+    try:
+        from app.integrations.vector_adapter import search_chunks_vector
+
+        vector_results = search_chunks_vector(profile_id, query, top_k=limit)
+        if vector_results:
+            return vector_results, "vector"
+    except Exception as e:
+        logger.warning("Vector search fallback for profile=%s: %s", profile_id, e)
+
+    return _search_chunks_keyword(db, profile_id, query, top_k=limit), "keyword"
+
+
+def _format_retrieved_context(chunks: list[dict], method: str) -> str:
+    if not chunks:
+        return "（尚无相关资料）"
+    parts = []
+    for c in chunks:
+        score_label = ""
+        if method == "vector" and c.get("similarity_score") is not None:
+            score_label = f" [similarity={float(c['similarity_score']):.4f}]"
+        parts.append(
+            f"[chunk_id={c.get('chunk_id')}] [chunk_index={c.get('chunk_index')}] "
+            f"[source={c.get('filename', '')}] [retrieval={method}]{score_label}\n"
+            f"{c.get('content', '')}"
+        )
+    return "\n\n---\n\n".join(parts)
+
+
+def _enrich_evidence_json(db: Session, profile_id: int, evidence_json: str) -> str:
+    if not evidence_json:
+        return evidence_json
+    try:
+        evidence_map = json.loads(evidence_json)
+    except json.JSONDecodeError:
+        return evidence_json
+
+    chunk_rows = (
+        db.query(Chunk, Document.filename, Document.parser)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .all()
+    )
+    by_index: dict[int, tuple[Chunk, str, str | None]] = {}
+    for chunk, filename, parser in chunk_rows:
+        by_index.setdefault(chunk.chunk_index, (chunk, filename, parser))
+
+    vector_available = False
+    try:
+        from app.integrations.vector_adapter import is_vector_available
+
+        vector_available = is_vector_available()
+    except Exception:
+        vector_available = False
+
+    for module in evidence_map.values():
+        if not isinstance(module, dict):
+            continue
+        for claim in module.get("claims", []):
+            if not isinstance(claim, dict):
+                continue
+            for item in claim.get("evidence", []):
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("chunk_index")
+                chunk_tuple = by_index.get(idx) if isinstance(idx, int) else None
+                if chunk_tuple:
+                    chunk, filename, parser = chunk_tuple
+                    item.setdefault("chunk_id", chunk.id)
+                    item.setdefault("filename", filename)
+                    item.setdefault("parser", parser or chunk.parser or "builtin")
+                item["retrieval_method"] = "vector" if vector_available else "keyword"
+                if vector_available and item.get("quote"):
+                    try:
+                        from app.integrations.vector_adapter import search_chunks_vector
+
+                        hits = search_chunks_vector(profile_id, str(item["quote"]), top_k=1)
+                        if hits:
+                            item["similarity_score"] = round(float(hits[0].get("similarity_score", 0.0)), 4)
+                    except Exception as e:
+                        logger.debug("Evidence similarity skipped: %s", e)
+                elif "similarity_score" not in item:
+                    item["similarity_score"] = None
+
+    return json.dumps(evidence_map, ensure_ascii=False)
+
+
 async def generate_analysis_report(
     db: Session,
     profile_id: int,
@@ -129,24 +331,73 @@ async def generate_analysis_report(
     if not profile:
         raise ValueError("人物档案不存在")
 
-    chunks = db.query(Chunk).filter(Chunk.profile_id == profile_id).order_by(Chunk.chunk_index).all()
-    if not chunks:
+    # Get all chunks with their document info for evidence context
+    chunks_with_docs = (
+        db.query(Chunk, Document.filename, Document.parser)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .order_by(Chunk.chunk_index)
+        .all()
+    )
+
+    if not chunks_with_docs:
         raise ValueError("该人物没有任何资料，请先上传资料。")
 
-    total_chunks = len(chunks)
-    total_chars = sum(c.char_count for c in chunks)
+    # Build chunks list with metadata
+    all_chunks = []
+    for chunk, filename, doc_parser in chunks_with_docs:
+        all_chunks.append({
+            "chunk_index": chunk.chunk_index,
+            "chunk_id": chunk.id,
+            "content": chunk.content,
+            "char_count": chunk.char_count,
+            "filename": filename,
+            "parser": doc_parser or "builtin",
+        })
 
-    # Pick representative chunks: first N + sampled from middle/end
+    total_chunks = len(all_chunks)
+    total_chars = sum(c["char_count"] for c in all_chunks)
+
+    # Pick representative chunks. Vector retrieval is preferred when enabled;
+    # keyword/chronological context remains the fallback.
     MAX_CONTEXT_CHARS = 30000
     context_parts = []
+    context_with_indices = []
     current_len = 0
-    for chunk in chunks:
-        if current_len + len(chunk.content) > MAX_CONTEXT_CHARS:
-            break
-        context_parts.append(chunk.content)
-        current_len += len(chunk.content)
+    context_source_chunks = all_chunks
+    retrieval_method = "keyword"
+    analysis_query = (
+        f"{profile.name} {profile.description or ''} 人物摘要 语言风格 价值观 "
+        "行为模式 冲突处理 证据化人物画像"
+    )
+    try:
+        relevant, method = search_relevant_chunks(
+            db,
+            profile_id,
+            analysis_query,
+            top_k=max(6, min(get_settings().vector_top_k, 10)),
+        )
+        if relevant and method == "vector":
+            retrieval_method = method
+            context_source_chunks = relevant
+    except Exception as e:
+        logger.warning("Analysis vector context fallback for profile=%s: %s", profile_id, e)
 
-    full_context = "\n\n---\n\n".join(context_parts)
+    for c in context_source_chunks:
+        if current_len + len(c["content"]) > MAX_CONTEXT_CHARS:
+            break
+        context_parts.append(c["content"])
+        score_label = ""
+        if c.get("retrieval_method") == "vector" and c.get("similarity_score") is not None:
+            score_label = f" [similarity={float(c['similarity_score']):.4f}]"
+        context_with_indices.append(
+            f"[chunk_id={c.get('chunk_id')}] [chunk_index={c['chunk_index']}] "
+            f"[source={c['filename']}] [retrieval={c.get('retrieval_method', retrieval_method)}]{score_label} "
+            f"{c['content']}"
+        )
+        current_len += len(c["content"])
+
+    full_context = "\n\n---\n\n".join(context_with_indices)
     rel_type = profile.relationship_type or "other"
 
     # Get template for this relationship type
@@ -154,29 +405,43 @@ async def generate_analysis_report(
 
     llm = get_llm_provider()
 
-    # Step 1: Generate deep portrait report (Markdown output directly)
+    # Step 1: Generate deep portrait report with evidence_map
     analysis_prompt = template.analysis_system_prompt
     portrait_md = ""
+    evidence_json = ""
     try:
         portrait_raw = await llm.generate_analysis(
             system_prompt=analysis_prompt,
             user_prompt=(
                 f"请分析以下关于 {profile.name} 的资料（关系类型：{rel_type}），"
-                f"共计 {total_chunks} 条片段、{total_chars} 字符，生成深度人物分析报告。\n\n"
+                f"共计 {total_chunks} 条片段、{total_chars} 字符，生成深度人物分析报告和 evidence_map。\n\n"
+                f"注意：每条资料都以 [chunk_index=N] [source=文件名] 开头，"
+                f"请在 evidence_map 中引用准确的 chunk_index。\n\n"
+                f"当前证据上下文检索方式：{retrieval_method}。如果为 vector，资料片段来自语义检索，"
+                f"请优先参考 similarity 较高且内容具体的片段。\n\n"
                 f"{full_context}"
             ),
             temperature=0.5,
-            max_tokens=4096,
+            max_tokens=8192,
         )
-        # The LLM now outputs Markdown directly; clean and add compliance header
-        portrait_md = _clean_portrait_md(profile.name, portrait_raw, total_chunks, total_chars)
+        # Split portrait and evidence_map
+        portrait_md = _portrait_md_from_raw(portrait_raw)
+        if not portrait_md:
+            portrait_md = portrait_raw  # Fallback if no === separator
+        evidence_json = _parse_evidence_map(portrait_raw)
+        evidence_json = _enrich_evidence_json(db, profile_id, evidence_json)
+        # Clean and add compliance header
+        portrait_md = _clean_portrait_md(profile.name, portrait_md, total_chunks, total_chars)
     except LLMError as e:
         logger.error(f"LLM analysis failed: {e}")
         portrait_md = _fallback_portrait(profile.name, total_chunks, total_chars, str(e))
     except Exception as e:
         logger.warning(f"Failed to generate portrait: {e}")
-        if 'portrait_raw' in dir():
-            portrait_md = _clean_portrait_md(profile.name, portrait_raw, total_chunks, total_chars)
+        if 'portrait_raw' in dir() and portrait_raw:
+            parts = portrait_raw.split("\n===\n")
+            portrait_md = _clean_portrait_md(profile.name, parts[0].strip(), total_chunks, total_chars)
+            evidence_json = _parse_evidence_map(portrait_raw)
+            evidence_json = _enrich_evidence_json(db, profile_id, evidence_json)
         else:
             portrait_md = _fallback_portrait(profile.name, total_chunks, total_chars, str(e))
 
@@ -205,6 +470,7 @@ async def generate_analysis_report(
         profile_id=profile_id,
         portrait_report=portrait_md,
         style_card=style_card,
+        evidence_json=evidence_json,
         total_chunks=total_chunks,
         total_chars=total_chars,
         model_used=llm.model_name,
@@ -315,18 +581,15 @@ async def chat_with_profile(
             "chunk_count": str(chunk_count),
         })
 
-    # Local retrieval
-    all_chunks = (
-        db.query(Chunk)
-        .filter(Chunk.profile_id == profile_id)
-        .all()
-    )
+    all_chunks = db.query(Chunk).filter(Chunk.profile_id == profile_id).all()
     chunk_texts = [c.content for c in all_chunks]
-    relevant_chunks = search_chunks_local(user_message, chunk_texts, top_k=5)
-    retrieved_context = (
-        "\n\n---\n\n".join([c["content"] for c in relevant_chunks])
-        if relevant_chunks else "（尚无相关资料）"
+    relevant_chunks, retrieval_method = search_relevant_chunks(
+        db,
+        profile_id,
+        user_message,
+        top_k=max(6, min(get_settings().vector_top_k, 10)),
     )
+    retrieved_context = _format_retrieved_context(relevant_chunks, retrieval_method)
 
     # mem0 long-term memory (optional, silent fallback — never breaks chat)
     mem0_context = ""
@@ -355,7 +618,11 @@ async def chat_with_profile(
 
     system_prompt = safe_format_template(chat_template, {
         "style_card": style_card,
-        "retrieved_context": retrieved_context,
+        "retrieved_context": (
+            f"当前检索方式：{retrieval_method}。"
+            f"{'这些片段来自语义向量检索，请优先参考高 similarity 片段。' if retrieval_method == 'vector' else '当前使用关键词检索 fallback。'}\n\n"
+            f"{retrieved_context}"
+        ),
         "user_message": user_message,
         "mode_instruction": mode_instruction,
     })
@@ -383,7 +650,19 @@ async def chat_with_profile(
         role="assistant",
         content=reply,
         retrieved_chunks=json.dumps(
-            [c["content"][:200] for c in relevant_chunks], ensure_ascii=False,
+            [
+                {
+                    "chunk_id": c.get("chunk_id"),
+                    "chunk_index": c.get("chunk_index"),
+                    "filename": c.get("filename", ""),
+                    "content": c.get("content", "")[:300],
+                    "retrieval_method": c.get("retrieval_method", retrieval_method),
+                    "similarity_score": c.get("similarity_score"),
+                    "score": c.get("score"),
+                }
+                for c in relevant_chunks
+            ],
+            ensure_ascii=False,
         ),
     )
     db.add(assistant_msg)
@@ -409,7 +688,131 @@ async def chat_with_profile(
     return {
         "reply": reply,
         "retrieved_count": len(relevant_chunks),
+        "retrieval_method": retrieval_method,
+        "retrieved_chunks": [
+            {
+                "chunk_id": c.get("chunk_id"),
+                "chunk_index": c.get("chunk_index"),
+                "filename": c.get("filename", ""),
+                "content": c.get("content", "")[:300],
+                "retrieval_method": c.get("retrieval_method", retrieval_method),
+                "similarity_score": c.get("similarity_score"),
+                "score": c.get("score"),
+            }
+            for c in relevant_chunks
+        ],
         "model_used": llm.model_name,
+    }
+
+
+# ── Analysis Quality ──
+
+def calculate_analysis_quality(db: Session, profile_id: int) -> dict:
+    """Calculate comprehensive analysis quality metrics."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        return {}
+
+    all_chunks = (
+        db.query(Chunk, Document.filename, Document.parser, Document.file_type)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .all()
+    )
+
+    chunk_count = len(all_chunks)
+    doc_count = db.query(Document).filter(Document.profile_id == profile_id).count()
+    total_chars = sum(c[0].char_count for c in all_chunks) if all_chunks else 0
+    filenames = set(c[1] for c in all_chunks)
+    parsers = set(c[2] for c in all_chunks)
+    file_types = set(c[3] for c in all_chunks)
+
+    # Check latest analysis for evidence coverage
+    latest = (
+        db.query(AnalysisReport)
+        .filter(AnalysisReport.profile_id == profile_id)
+        .order_by(AnalysisReport.created_at.desc())
+        .first()
+    )
+
+    evidence_coverage = 0.0
+    avg_confidence = 0.0
+    if latest and latest.evidence_json:
+        try:
+            ev = json.loads(latest.evidence_json)
+            total_claims = 0
+            total_conf = 0
+            modules_with_data = 0
+            for mod_key, mod_data in ev.items():
+                if isinstance(mod_data, dict):
+                    claims = mod_data.get("claims", [])
+                    if mod_data.get("data_sufficient", False) and claims:
+                        modules_with_data += 1
+                    for claim in claims:
+                        if isinstance(claim, dict):
+                            total_claims += 1
+                            total_conf += claim.get("confidence_score", 0)
+            if 14 > 0:
+                evidence_coverage = round(modules_with_data / 14 * 100, 1)
+            if total_claims > 0:
+                avg_confidence = round(total_conf / total_claims, 1)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # Diversity scoring
+    diversity_score = 0.0
+    if doc_count > 0:
+        diversity_score += min(doc_count * 10, 30)  # Up to 30 for doc count
+        if len(file_types) > 1:
+            diversity_score += min(len(file_types) * 10, 20)  # Up to 20 for file type variety
+        if "mineru" in parsers:
+            diversity_score += 15  # Bonus for complex doc parsing
+    diversity_score = min(diversity_score, 100)
+
+    # Check content types
+    all_text = " ".join(c[0].content[:500] for c in all_chunks[:50]).lower()
+    has_chat_corpus = any(kw in all_text for kw in ["聊天", "对话", "我说", "他说", "回复", "消息", "微信", "qq", "短信"])
+    has_long_text = any(c[0].char_count > 800 for c in all_chunks)
+    has_multi_emotion = any(kw in all_text for kw in ["开心", "难过", "生气", "焦虑", "兴奋", "失望", "愤怒", "高兴", "哭"])
+
+    # Suitability level
+    if total_chars < 2000:
+        suitability_level = "rough"
+        suitability_label = "粗略画像"
+    elif total_chars < 10000:
+        suitability_level = "basic"
+        suitability_label = "基础画像"
+    elif total_chars < 50000 and evidence_coverage < 40:
+        suitability_level = "moderate"
+        suitability_label = "中等可靠"
+    elif total_chars >= 50000 and evidence_coverage >= 40:
+        suitability_level = "style_sim"
+        suitability_label = "较适合风格模拟"
+    elif total_chars >= 50000 and evidence_coverage >= 60:
+        suitability_level = "personality_replica"
+        suitability_label = "可用于人格分析参考"
+    else:
+        suitability_level = "moderate"
+        suitability_label = "中等可靠"
+    # Don't over-claim
+    if suitability_level == "personality_replica" and not has_chat_corpus:
+        suitability_level = "style_sim"
+        suitability_label = "较适合风格模拟（仍不足以人格复刻）"
+
+    return {
+        "total_chars": total_chars,
+        "document_count": doc_count,
+        "chunk_count": chunk_count,
+        "evidence_coverage": evidence_coverage,
+        "avg_confidence": avg_confidence,
+        "diversity_score": round(diversity_score, 1),
+        "has_chat_corpus": has_chat_corpus,
+        "has_long_text": has_long_text,
+        "has_multi_emotion": has_multi_emotion,
+        "suitability_level": suitability_level,
+        "suitability_label": suitability_label,
+        "distinct_sources": len(filenames),
+        "parsers": list(parsers),
     }
 
 
@@ -526,3 +929,142 @@ DEFAULT_CHAT_TEMPLATE = """你正在模拟一个基于资料生成的 AI 角色�
 {mode_instruction}
 
 请以模拟角色的方式自然回复（纯文本，不要输出 JSON）："""
+
+
+# ── Export Analysis Report ──
+
+def export_analysis_report(db: Session, profile_id: int) -> str:
+    """Export the full analysis report including portrait, style card, evidence chain,
+    confidence scores, data gaps, and compliance statement."""
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise ValueError("人物档案不存在")
+
+    latest = (
+        db.query(AnalysisReport)
+        .filter(AnalysisReport.profile_id == profile_id)
+        .order_by(AnalysisReport.created_at.desc())
+        .first()
+    )
+    if not latest:
+        raise ValueError("该人物尚未生成画像，请先上传资料并运行分析。")
+
+    quality = calculate_analysis_quality(db, profile_id)
+
+    parts = [
+        f"# {profile.name} 的完整分析报告",
+        "",
+        f"> 生成时间：{latest.created_at.isoformat() if latest.created_at else '未知'}",
+        f"> 分析模型：{latest.model_used}",
+        f"> 资料统计：{latest.total_chunks} 条片段 · {latest.total_chars} 字符",
+        f"> 证据覆盖率：{quality.get('evidence_coverage', 0)}%",
+        f"> 平均置信度：{quality.get('avg_confidence', 0)}",
+        f"> 适合程度：{quality.get('suitability_label', '未知')}",
+        "",
+        "---",
+        "",
+        "## 深度人物画像",
+        "",
+        latest.portrait_report or "（无）",
+        "",
+        "---",
+        "",
+        "## AI 风格卡",
+        "",
+        latest.style_card or "（无）",
+        "",
+        "---",
+        "",
+        "## 证据链",
+        "",
+    ]
+
+    if latest.evidence_json:
+        try:
+            ev = json.loads(latest.evidence_json)
+            for mod_key in sorted(ev.keys(), key=lambda k: int(k) if k.isdigit() else 99):
+                mod = ev[mod_key]
+                if isinstance(mod, dict):
+                    module_name = mod.get("module_name", f"模块 {mod_key}")
+                    parts.append(f"### 模块 {mod_key}：{module_name}")
+                    if not mod.get("data_sufficient", True):
+                        parts.append("**资料不足，无法提供可靠证据。**")
+                        parts.append("")
+                        continue
+                    for i, claim in enumerate(mod.get("claims", [])):
+                        if isinstance(claim, dict):
+                            parts.append(f"#### 判断 {i+1}: {claim.get('claim', '')}")
+                            parts.append(f"- 置信度：{claim.get('confidence_score', 0)}/100")
+                            for ev_item in claim.get("evidence", []):
+                                if isinstance(ev_item, dict):
+                                    parts.append(
+                                        f"  - 证据（chunk_index={ev_item.get('chunk_index', '?')}）："
+                                        f"> {ev_item.get('quote', '')}"
+                                    )
+                            if claim.get("data_gap"):
+                                parts.append(f"- 资料不足项：{claim['data_gap']}")
+                            if claim.get("contradiction"):
+                                parts.append(f"- 矛盾表达：{claim['contradiction']}")
+                            parts.append("")
+        except (json.JSONDecodeError, Exception):
+            parts.append("证据地图解析失败。")
+    else:
+        parts.append("当前分析未生成证据地图。请重新分析以生成 evidence_map。")
+
+    parts += [
+        "---",
+        "",
+        "## 资料不足项总览",
+        "",
+    ]
+
+    # Extract all data_gaps from evidence
+    if latest.evidence_json:
+        try:
+            ev = json.loads(latest.evidence_json)
+            all_gaps = []
+            for mod_key, mod in ev.items():
+                if isinstance(mod, dict):
+                    for claim in mod.get("claims", []):
+                        if isinstance(claim, dict) and claim.get("data_gap"):
+                            all_gaps.append(
+                                f"- [{mod.get('module_name', mod_key)}] {claim['data_gap']}"
+                            )
+            if all_gaps:
+                parts.append("\n".join(all_gaps))
+            else:
+                parts.append("所有模块资料充足，无明显缺失。")
+        except Exception:
+            parts.append("无法解析资料不足项。")
+    else:
+        parts.append("需要重新分析以获取资料不足项。")
+
+    parts += [
+        "",
+        "---",
+        "",
+        "## 分析质量总览",
+        f"- 资料字数：{quality.get('total_chars', 0):,}",
+        f"- 文档数量：{quality.get('document_count', 0)}",
+        f"- 片段数量：{quality.get('chunk_count', 0)}",
+        f"- 来源文件数：{quality.get('distinct_sources', 0)}",
+        f"- 证据覆盖率：{quality.get('evidence_coverage', 0)}%",
+        f"- 平均置信度：{quality.get('avg_confidence', 0)}",
+        f"- 资料多样性评分：{quality.get('diversity_score', 0)}/100",
+        f"- 包含聊天语料：{'是' if quality.get('has_chat_corpus') else '否'}",
+        f"- 包含长文本：{'是' if quality.get('has_long_text') else '否'}",
+        f"- 包含多情绪场景：{'是' if quality.get('has_multi_emotion') else '否'}",
+        f"- 当前适合程度：{quality.get('suitability_label', '未知')}",
+        "",
+        "---",
+        "",
+        "## 合规声明",
+        "",
+        f"- {COMPLIANCE_DISCLAIMER}",
+        "- 本报告由 AI Clone 自动生成，仅供了解人物风格、辅助工具使用，不得用于冒充、诈骗等违法用途。",
+        "- 分析结论为基于资料的 AI 推断，不代表事实或医学诊断。",
+        "- 如涉及他人隐私，请确保已获合法授权。",
+        "- 沟通策略仅用于良性沟通，不提供操控、PUA、骚扰、冒充真人策略。",
+    ]
+
+    return "\n".join(parts)

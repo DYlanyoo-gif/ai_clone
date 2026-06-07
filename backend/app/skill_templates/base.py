@@ -17,13 +17,18 @@ COMPLIANCE_STATEMENT = (
 # Unified Deep Analysis Prompt (14-module Markdown report)
 # ═══════════════════════════════════════════════════════════════════════
 
-DEEP_ANALYSIS_SYSTEM_PROMPT = f"""你是一位专业的人物文本分析专家。你的任务是基于提供的资料，生成一份严谨、全面的中文深度人物分析报告。
+DEEP_ANALYSIS_SYSTEM_PROMPT = f"""你是一位专业的人物文本分析专家。你的任务是基于提供的资料，生成一份严谨、全面的中文深度人物分析报告，同时输出结构化证据地图。
 
 {COMPLIANCE_STATEMENT}
 
 你必须严格基于资料进行分析，不得编造资料中没有的内容。所有分析结论都应视为"根据资料推测"，不得写成绝对诊断或医学诊断。
 
-请严格按照以下结构输出中文 Markdown 报告。如果某个模块资料不足，不要硬编，诚实写"资料不足，无法分析"。
+请严格按照以下结构输出。第一部分是 Markdown 报告，第二部分是 JSON evidence_map。
+
+---
+# 输出格式
+
+先输出完整的 Markdown 报告，然后输出 3 个等号 `===` 独占一行，再输出一个 JSON 对象 evidence_map。
 
 ---
 
@@ -136,9 +141,58 @@ DEEP_ANALYSIS_SYSTEM_PROMPT = f"""你是一位专业的人物文本分析专家�
 - 不代表本人真实意愿
 - 禁止冒充真人、诈骗、骚扰、伪造授权、伪造遗嘱、法律/医疗/财务决定
 
----
+===
 
-直接输出 Markdown，不要额外解释。"""
+以下是 evidence_map JSON 对象，键为模块编号（"1"到"14"对应上述 14 个模块），值为该模块的证据对象：
+
+```json
+{{
+  "1": {{
+    "module_name": "人物摘要",
+    "data_sufficient": true,
+    "claims": [
+      {{
+        "claim": "判断语句，如'根据资料，该人物倾向于理性分析后做决定'",
+        "evidence": [
+          {{"chunk_index": 0, "quote": "原文摘录片段（15-50字）"}}
+        ],
+        "confidence_score": 75,
+        "data_gap": "仍然缺少的资料类型，若无则填 null",
+        "contradiction": "资料中矛盾表达，若无则填 null"
+      }}
+    ]
+  }},
+  "5": {{
+    "module_name": "性格倾向分析",
+    "data_sufficient": true,
+    "claims": [
+      {{
+        "claim": "性格判断",
+        "evidence": [
+          {{"chunk_index": 3, "quote": "原文摘录"}},
+          {{"chunk_index": 7, "quote": "另一处原文摘录"}}
+        ],
+        "confidence_score": 60,
+        "data_gap": "缺乏多场景下的行为样本",
+        "contradiction": null
+      }}
+    ]
+  }}
+}}
+```
+
+evidence_map 规则：
+1. 14 个模块全部要写，即使资料不足也要写 data_sufficient: false 和空 claims。
+2. 每条 claim 的 evidence 必须引用资料中实际出现的内容，chunk_index 对应资料片段编号（从 0 开始），quote 摘录 15-80 字原文。
+3. confidence_score 0-100：有 3+ 处直接证据 → 80+；有 1-2 处直接证据 → 50-79；只有间接推断 → 20-49；无资料硬猜 → 0（此时必须写 data_sufficient: false）。
+4. data_gap 诚实写缺什么资料；无缺失填 null。
+5. contradiction 如实写资料中的矛盾表达；无矛盾填 null。
+6. 不允许无证据强行下结论。资料不足时必须写 data_sufficient: false 且 claims 为空或标注"资料不足"。
+7. 不做医学或精神疾病诊断。
+8. 不把推测写成事实。
+9. 沟通策略只能用于良性沟通，不提供操控、PUA、骚扰、冒充真人策略。
+
+直接输出，不要额外解释。"""
 
 # ═══════════════════════════════════════════════════════════════════════
 # Unified Deep Style Card Prompt (10-section executable style card)

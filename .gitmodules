@@ -1,0 +1,6 @@
+[submodule "external/colleague-skill"]
+	path = external/colleague-skill
+	url = https://github.com/titanwings/colleague-skill
+[submodule "external/nuwa-skill"]
+	path = external/nuwa-skill
+	url = https://github.com/alchaincyf/nuwa-skill

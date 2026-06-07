@@ -1,187 +1,308 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getMineruStatus, getMem0Status, getConfigStatus, type MineruStatus, type Mem0Status, type ConfigStatus } from '../api/client'
+import {
+  getMineruStatus, getConfigStatus, getVectorStatus,
+  getNuwaStatus, getColleagueStatus,
+  type MineruStatus, type ConfigStatus,
+  type VectorStatus, type SkillIntegrationStatus,
+} from '../api/client'
 
-type StackStatus = 'enabled' | 'installed_disabled' | 'not_installed' | 'export_only' | 'planned'
+type StackTone = 'success' | 'info' | 'muted' | 'warning'
 
 interface StackItem {
   name: string
-  project: string
-  status: StackStatus
+  statusText: string
+  tone: StackTone
   desc: string
 }
 
-function statusLabel(s: StackStatus): string {
-  const map: Record<StackStatus, string> = {
-    enabled: '已启用',
-    installed_disabled: '已安装未启用',
-    not_installed: '未安装',
-    export_only: '仅导出支持',
-    planned: '后续计划',
-  }
-  return map[s]
-}
+const importMaterials = [
+  {
+    title: '聊天记录导出文本',
+    desc: '微信 / QQ / Telegram 等已授权整理的聊天记录文本。',
+  },
+  {
+    title: '客户沟通记录',
+    desc: '销售对话、客服记录、客户访谈和长期沟通纪要。',
+  },
+  {
+    title: '关系沟通资料',
+    desc: '朋友、伴侣、同事之间已获得授权的沟通资料。',
+  },
+  {
+    title: '公开内容',
+    desc: '博客、公众号、朋友圈、小红书、推文等公开或已授权内容。',
+  },
+  {
+    title: '职业资料',
+    desc: '简历、访谈稿、会议纪要、邮件和项目沟通记录。',
+  },
+  {
+    title: '复杂文档',
+    desc: 'PDF / Word / 图片等需要解析整理的多格式资料。',
+  },
+]
 
-function statusClass(s: StackStatus): string {
-  const map: Record<StackStatus, string> = {
-    enabled: 'badge badge-success',
-    installed_disabled: 'badge badge-warning',
-    not_installed: 'badge badge-muted',
-    export_only: 'badge badge-info',
-    planned: 'badge badge-muted',
+const resultItems = [
+  '人物画像与性格倾向',
+  '语言风格和常用表达',
+  '沟通方式与关系边界',
+  '决策习惯与情绪模式',
+  '冲突风险和资料不足提示',
+  '证据链和置信度',
+  'Nuwa / Colleague 双引擎模拟实验台',
+  '完整 Markdown 分析报告导出',
+]
+
+const scenarios = [
+  {
+    title: '客户沟通分析',
+    desc: '分析客户关注点、表达风格、决策倾向，辅助后续沟通。',
+  },
+  {
+    title: '朋友 / 伴侣沟通理解',
+    desc: '基于已授权聊天资料，理解对方沟通习惯、情绪触发点和边界。',
+  },
+  {
+    title: '博主 / IP 风格拆解',
+    desc: '分析公开文章、推文、公众号内容，提取语言风格和内容逻辑。',
+  },
+  {
+    title: '候选人 / 合作者资料整理',
+    desc: '基于简历、访谈、公开资料生成证据化画像，辅助理解沟通方式。',
+  },
+  {
+    title: '个人数字档案',
+    desc: '整理自己的文章、聊天记录、笔记，生成个人表达风格和思维画像。',
+  },
+]
+
+const flowSteps = [
+  ['01', '导入授权资料', '上传聊天记录文本、公开内容、简历、PDF、Word 或图片等资料。'],
+  ['02', '整理为可分析文本', '系统解析复杂文档，并把资料整理为可追溯的文本片段。'],
+  ['03', '生成证据化画像', '输出人物画像、表达风格、关系边界、风险提示和置信度。'],
+  ['04', '进入模拟实验台', '运行 Nuwa 思维模拟、Colleague 互动模拟或双引擎对比。'],
+  ['05', '导出报告', '生成 Markdown 分析报告，也可导出 RAG / SFT 数据集。'],
+]
+
+function badgeClass(tone: StackTone): string {
+  const map: Record<StackTone, string> = {
+    success: 'badge badge-success',
+    info: 'badge badge-info',
+    muted: 'badge badge-muted',
+    warning: 'badge badge-warning',
   }
-  return map[s]
+  return map[tone]
 }
 
 export default function HomePage() {
   const [mineru, setMineru] = useState<MineruStatus | null>(null)
-  const [mem0, setMem0] = useState<Mem0Status | null>(null)
   const [config, setConfig] = useState<ConfigStatus | null>(null)
+  const [vector, setVector] = useState<VectorStatus | null>(null)
+  const [nuwa, setNuwa] = useState<SkillIntegrationStatus | null>(null)
+  const [colleague, setColleague] = useState<SkillIntegrationStatus | null>(null)
 
   useEffect(() => {
     getMineruStatus().then(setMineru).catch(() => {})
-    getMem0Status().then(setMem0).catch(() => {})
     getConfigStatus().then(setConfig).catch(() => {})
+    getVectorStatus().then(setVector).catch(() => {})
+    getNuwaStatus().then(setNuwa).catch(() => {})
+    getColleagueStatus().then(setColleague).catch(() => {})
   }, [])
 
   const stackItems: StackItem[] = [
     {
       name: 'DeepSeek',
-      project: 'DeepSeek API',
-      status: config && !config.is_mock ? 'enabled' : 'not_installed',
-      desc: '大模型分析与对话 — deepseek-v4-pro',
+      statusText: config && !config.is_mock ? '已接入' : '服务配置中',
+      tone: config && !config.is_mock ? 'success' : 'muted',
+      desc: '画像与模拟生成引擎，用于生成证据化分析、风格总结和模拟回答。',
     },
     {
       name: 'MinerU',
-      project: 'opendatalab/MinerU',
-      status: mineru?.installed && mineru?.enabled ? 'enabled'
-        : mineru?.installed ? 'installed_disabled' : 'not_installed',
-      desc: `PDF/Office/图片解析 — ${mineru?.backend || 'pipeline'} · ${mineru?.method || 'auto'}`,
+      statusText: mineru?.enabled ? '已启用' : '可协助处理',
+      tone: mineru?.enabled ? 'success' : 'info',
+      desc: '复杂文档解析能力，支持 PDF、Office、图片等资料整理。',
     },
     {
-      name: 'Skill Templates',
-      project: 'nuwa-skill / dot-skill',
-      status: 'enabled',
-      desc: '风格人物蒸馏模板 — 中文自写 Skill.md 兼容模板',
+      name: 'Persona Skill Foundry',
+      statusText: nuwa?.available || colleague?.available ? '已接入' : '服务配置中',
+      tone: nuwa?.available || colleague?.available ? 'success' : 'muted',
+      desc: 'Nuwa / Colleague 双引擎，用于站内人物模拟实验台。',
     },
     {
-      name: 'mem0',
-      project: 'mem0ai/mem0',
-      status: mem0?.installed && mem0?.enabled && mem0?.available ? 'enabled'
-        : mem0?.installed && !mem0?.available ? 'not_installed'
-        : mem0?.installed ? 'installed_disabled' : 'not_installed',
-      desc: mem0?.detail || '长期记忆层 — 可选，未安装时使用 SQLite',
+      name: '基础检索',
+      statusText: '已启用',
+      tone: 'success',
+      desc: '默认证据检索能力，保障画像、证据弹窗和模拟问答可用。',
     },
     {
-      name: 'Easy Dataset',
-      project: 'Easy Dataset',
-      status: 'export_only',
-      desc: 'RAG 数据集 JSONL 导出 — 无需安装原项目',
+      name: '语义检索增强',
+      statusText: vector?.available ? '已启用' : '管理员可选',
+      tone: vector?.available ? 'success' : 'info',
+      desc: '资料量较大时可启用语义检索，提升证据命中质量。',
     },
     {
-      name: 'LLaMA Factory',
-      project: 'LLaMA Factory',
-      status: 'export_only',
-      desc: 'SFT 微调数据 JSONL 导出 — 训练需 GPU，不在此项目运行',
+      name: '数据导出',
+      statusText: '已支持',
+      tone: 'success',
+      desc: '支持完整分析报告、RAG Dataset 和 SFT Dataset 导出。',
     },
   ]
 
   return (
-    <div>
-      <div className="card" style={{ marginBottom: '1.5rem', textAlign: 'center', padding: '3rem 2rem' }}>
-        <h1 style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>
-          AI Clone
-        </h1>
-        <p style={{ fontSize: '1.1rem', color: 'var(--c-text-muted)', maxWidth: 600, margin: '0 auto 1.5rem' }}>
-          GitHub 开源项目聚合型 AI Clone 平台 — 上传资料，生成画像，对话回溯
-        </p>
-        <p style={{ marginBottom: '1.5rem', lineHeight: 1.8, maxWidth: 700, margin: '0 auto 1.5rem' }}>
-          上传某个人的文章、聊天记录、访谈文本、笔记等资料，
-          系统自动生成人物画像报告、说话风格卡、记忆时间线，
-          并提供一个基于资料检索增强的对话机器人。
-        </p>
-        <Link to="/profiles" className="btn-primary" style={{ display: 'inline-block', padding: '0.75rem 2rem', fontSize: '1rem' }}>
-          开始使用
-        </Link>
-      </div>
+    <div className="home-page fade-in">
+      <section className="card hero-panel service-hero">
+        <div>
+          <div className="hero-kicker">Evidence Profile Service</div>
+          <h1>把授权资料整理成可追溯的人物画像和模拟实验台</h1>
+          <p>
+            你提供有权使用的聊天记录、公开内容或文档资料，系统会整理证据、生成画像结论，
+            并给出可查看来源的模拟回答和 Markdown 报告。
+          </p>
+          <p className="hero-note">
+            生成结果是基于资料的分析与模拟，不是本人意识，也不代表本人真实意愿。
+          </p>
+          <div className="hero-actions">
+            <Link to="/profiles" className="btn-primary">进入人物档案</Link>
+            <a href="#contact" className="btn-secondary">联系资料整理服务</a>
+          </div>
+        </div>
+        <div className="hero-side service-hero-side">
+          <div className="metric-card">
+            <div className="metric-label">Materials</div>
+            <div className="metric-value">聊天 / 文档 / 公开内容</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-label">Outputs</div>
+            <div className="metric-value">画像 · 证据 · 报告</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-label">Runtime</div>
+            <div className="metric-value">Nuwa / Colleague</div>
+          </div>
+        </div>
+      </section>
 
-      <div className="disclaimer" style={{ marginBottom: '1.5rem', fontSize: '0.85rem' }}>
-        <strong>重要声明：</strong>本产品基于用户提供的资料由 AI 生成模拟角色，
-        并非本人意识，不代表本人真实意愿。禁止用于冒充真人、诈骗、骚扰或任何违法用途。
-        涉及他人隐私资料时，请确保已获得合法授权。
-        如用户要求 AI 冒充真人联系他人、生成欺骗性内容、伪造授权、伪造遗嘱或做出法律/医疗/财务决定，
-        系统将拒绝并说明边界。
-      </div>
+      <section id="materials">
+        <div className="section-title">
+          <div>
+            <h2>适合导入的资料</h2>
+            <p>系统适合处理已经整理好、可授权使用、需要进一步分析的人物资料。</p>
+          </div>
+        </div>
+        <div className="service-grid">
+          {importMaterials.map((item, index) => (
+            <ServiceCard key={item.title} index={String(index + 1).padStart(2, '0')} title={item.title} desc={item.desc} />
+          ))}
+        </div>
+        <div className="compliance-panel">
+          <strong>合规边界</strong>
+          <p>
+            只支持用户有权使用或已获得授权的资料。不提供未授权聊天记录获取、破解、绕过登录、
+            恢复他人隐私数据等服务，也不得用于冒充真人、诈骗、骚扰或操控关系。
+          </p>
+        </div>
+      </section>
 
-      {/* Open Source Capability Stack */}
-      <div className="card" style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem', borderBottom: '1px solid var(--c-border)', paddingBottom: '0.5rem' }}>
-          开源能力栈
-        </h2>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.5rem' }}>
-          {stackItems.map(item => (
-            <div key={item.name} style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '0.5rem 0.75rem', background: 'var(--c-bg-raised)', borderRadius: '6px',
-              border: '1px solid var(--c-border)',
-            }}>
-              <div>
-                <strong style={{ fontSize: '0.9rem' }}>{item.name}</strong>
-                <div style={{ fontSize: '0.75rem', color: 'var(--c-text-muted)' }}>{item.desc}</div>
-              </div>
-              <span className={statusClass(item.status)} style={{ fontSize: '0.7rem', whiteSpace: 'nowrap' }}>
-                {statusLabel(item.status)}
-              </span>
+      <section id="results">
+        <div className="section-title">
+          <div>
+            <h2>能得到什么结果</h2>
+            <p>输出不是空泛总结，而是带证据、置信度和资料不足提示的分析结果。</p>
+          </div>
+        </div>
+        <div className="result-grid">
+          {resultItems.map(item => (
+            <div className="result-item" key={item}>
+              <span />
+              <strong>{item}</strong>
             </div>
           ))}
         </div>
-        <p style={{ fontSize: '0.7rem', color: 'var(--c-text-muted)', marginTop: '0.5rem' }}>
-          状态说明：已启用 = 真实接入并可运行 | 已安装未启用 = 已安装但配置关闭 | 未安装 = 可选依赖需手动安装 | 仅导出支持 = 生成标准格式文件，不需要安装原项目
-        </p>
-      </div>
+      </section>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
-        <FeatureCard
-          title="人物档案管理"
-          desc="创建和管理多个人物档案，记录基本信息和关系类型。"
-          icon="📋"
-        />
-        <FeatureCard
-          title="智能资料解析"
-          desc="支持 txt、md、json、csv、PDF、DOCX、PPTX、XLSX、图片，通过 MinerU 自动解析为可检索文本。"
-          icon="📄"
-        />
-        <FeatureCard
-          title="AI 人物画像"
-          desc="基于上传资料自动生成详细的人物画像报告和风格卡，包括常用表达、情绪倾向、价值观等。"
-          icon="🎯"
-        />
-        <FeatureCard
-          title="RAG 记忆对话"
-          desc="基于资料检索增强的对话机器人，以模拟角色方式回答，可选 mem0 长期记忆层。"
-          icon="💬"
-        />
-        <FeatureCard
-          title="多 Provider 支持"
-          desc="支持 DeepSeek API，也可在 Mock 模式下无 API Key 体验。"
-          icon="🔌"
-        />
-        <FeatureCard
-          title="隐私与合规"
-          desc="所有数据本地存储，明确的合规边界设计，AI 不会冒充真人或做出违法建议。"
-          icon="🔒"
-        />
-      </div>
+      <section id="scenarios">
+        <div className="section-title">
+          <div>
+            <h2>使用场景</h2>
+            <p>更适合做理解、整理和辅助沟通，不用于代替本人表达真实意愿。</p>
+          </div>
+        </div>
+        <div className="scenario-grid">
+          {scenarios.map((item, index) => (
+            <article className="card scenario-card hover-lift" key={item.title}>
+              <span className="feature-index">{String(index + 1).padStart(2, '0')}</span>
+              <h3>{item.title}</h3>
+              <p>{item.desc}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="flow">
+        <div className="section-title">
+          <div>
+            <h2>服务流程</h2>
+            <p>从资料导入到报告导出，普通用户不需要理解内部工程状态。</p>
+          </div>
+        </div>
+        <div className="flow-strip service-flow">
+          {flowSteps.map(([idx, title, desc]) => (
+            <div className="flow-step slide-up" key={idx}>
+              <span>{idx}</span>
+              <strong>{title}</strong>
+              <p>{desc}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section id="contact" className="card contact-panel">
+        <div>
+          <span className="badge badge-info">联系服务</span>
+          <h2>需要协助整理资料或复杂文档？</h2>
+          <p>
+            如果你需要协助整理微信 / QQ 聊天记录、客户沟通记录、复杂 PDF / Word 文档，
+            可以联系我进行资料整理与分析服务。
+          </p>
+        </div>
+        <div className="contact-box">
+          <strong>微信 / QQ / 邮箱</strong>
+          <p>请在这里填写</p>
+        </div>
+      </section>
+
+      <section className="technical-note-section">
+        <div className="section-title">
+          <div>
+            <h2>技术能力说明</h2>
+            <p>以下为后台能力概览；安装、依赖和管理员诊断信息不在普通首页展示。</p>
+          </div>
+        </div>
+        <div className="stack-grid compact-stack-grid">
+          {stackItems.map(item => (
+            <article className="card stack-card compact-stack-card hover-lift" key={item.name}>
+              <header>
+                <div>
+                  <h3>{item.name}</h3>
+                  <p>{item.desc}</p>
+                </div>
+                <span className={badgeClass(item.tone)}>{item.statusText}</span>
+              </header>
+            </article>
+          ))}
+        </div>
+      </section>
     </div>
   )
 }
 
-function FeatureCard({ title, desc, icon }: { title: string; desc: string; icon: string }) {
+function ServiceCard({ index, title, desc }: { index: string; title: string; desc: string }) {
   return (
-    <div className="card" style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>{icon}</div>
-      <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>{title}</h3>
-      <p style={{ fontSize: '0.85rem', color: 'var(--c-text-muted)' }}>{desc}</p>
-    </div>
+    <article className="card service-card hover-lift">
+      <span className="feature-index">{index}</span>
+      <h3>{title}</h3>
+      <p>{desc}</p>
+    </article>
   )
 }

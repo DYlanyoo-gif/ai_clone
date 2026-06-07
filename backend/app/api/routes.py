@@ -2,31 +2,57 @@ from __future__ import annotations
 
 import logging
 import os
+import json
+import zipfile
+from io import BytesIO
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.models.database import Profile, Document, Chunk, AnalysisReport, ChatMessage
+from app.models.database import Profile, Document, Chunk, AnalysisReport, ChatMessage, GeneratedSkill, RuntimeValidationResult
 from app.models.session import get_db
 from app.schemas.models import (
     ProfileCreate, ProfileResponse, ProfileDetail,
     DocumentResponse, AnalysisResponse,
+    ProfilePipelineOptions, ProfilePipelineResponse,
     ChatRequest, ChatResponse, ChatMessageResponse,
     MessageResponse, ErrorResponse, MineruStatusResponse,
     Mem0StatusResponse, MemoryRebuildResponse, MemorySearchRequest,
+    VectorStatusResponse, VectorRebuildResponse, VectorSearchResponse,
+    SkillIntegrationStatusResponse, SkillSpecResponse, GeneratedSkillResponse,
+    SkillGenerateResponse, SkillValidationResponse, SkillDryRunRequest,
+    RuntimeTestCaseRequest, RuntimeTestCasesResponse, RuntimeResultSubmitRequest,
+    RuntimeResultResponse, RuntimeEvaluationResponse,
+    SkillWebsiteRunRequest, SkillRuntimeRunResponse, SkillCompareRunRequest,
+    SkillCompareRunResponse, SkillRuntimeFeedbackRequest, SkillRuntimeFeedbackResponse,
 )
 from app.services.document_processor import parse_file_content
 from app.services.profile_service import (
     process_document_upload, generate_analysis_report, chat_with_profile,
-    export_skill_card, get_data_sufficiency,
+    export_skill_card, get_data_sufficiency, calculate_analysis_quality,
+    export_analysis_report,
 )
+from app.services.profile_pipeline_service import run_profile_analysis_pipeline
 from app.services.llm_provider import get_config_status
 from app.integrations.easy_dataset_adapter import export_chunks_jsonl
 from app.integrations.llamafactory_adapter import export_sft_dataset, export_sft_jsonl
 from app.integrations.mineru_adapter import detect_mineru, parse_with_mineru, MineruStatus
 from app.integrations.mem0_adapter import detect_mem0, rebuild_memories_sync, search_memory_sync
+from app.integrations.vector_adapter import detect_vector, collection_info, index_chunks, delete_document_vectors
+from app.integrations import nuwa_skill_adapter, colleague_skill_adapter
+from app.integrations.skill_foundry_common import generated_skill_to_dict
+from app.integrations.skill_runtime_validator import validate_skill_package, dry_run_skill_execution
+from app.integrations.skill_installer import prepare_runtime_install_bundle
+from app.integrations.skill_runtime_testcases import (
+    generate_runtime_test_cases, load_runtime_test_cases, evaluate_runtime_result,
+)
+from app.services.skill_runtime_service import (
+    run_skill_in_website, list_skill_runtime_runs, get_skill_runtime_run,
+    compare_skill_runs, submit_skill_runtime_feedback,
+)
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -118,6 +144,52 @@ async def mem0_status():
     )
 
 
+# ── Vector Retrieval Integration Status ──
+
+@router.get("/integrations/vector/status", response_model=VectorStatusResponse)
+async def vector_status(profile_id: int | None = None):
+    """Check Qdrant/FastEmbed optional vector retrieval status.
+
+    profile_id is optional and only used to report the local collection state.
+    """
+    status = detect_vector()
+    info = collection_info(profile_id) if profile_id else {}
+    return VectorStatusResponse(
+        installed=status.installed,
+        enabled=status.enabled,
+        available=status.available,
+        provider=status.provider,
+        embedding_model=status.embedding_model,
+        error=status.error,
+        detail=status.detail,
+        collection=info.get("collection"),
+        points_count=info.get("points_count", 0),
+        indexed=info.get("indexed", False),
+    )
+
+
+# ── Skill Foundry Integration Status ──
+
+@router.get("/integrations/nuwa/status", response_model=SkillIntegrationStatusResponse)
+async def nuwa_status():
+    return nuwa_skill_adapter.detect()
+
+
+@router.get("/integrations/nuwa/spec", response_model=SkillSpecResponse)
+async def nuwa_spec():
+    return nuwa_skill_adapter.load_spec()
+
+
+@router.get("/integrations/colleague/status", response_model=SkillIntegrationStatusResponse)
+async def colleague_status():
+    return colleague_skill_adapter.detect()
+
+
+@router.get("/integrations/colleague/spec", response_model=SkillSpecResponse)
+async def colleague_spec():
+    return colleague_skill_adapter.load_spec()
+
+
 # ── Profile CRUD ──
 
 @router.post("/profiles", response_model=ProfileResponse, status_code=201)
@@ -166,6 +238,8 @@ async def get_profile(profile_id: int, db: Session = Depends(get_db)):
         .first()
     )
 
+    analysis_quality = calculate_analysis_quality(db, profile_id) if total_chars > 0 else None
+
     return ProfileDetail(
         id=profile.id,
         name=profile.name,
@@ -179,6 +253,8 @@ async def get_profile(profile_id: int, db: Session = Depends(get_db)):
         has_analysis=has_analysis,
         latest_portrait=latest_analysis.portrait_report if latest_analysis else None,
         latest_style_card=latest_analysis.style_card if latest_analysis else None,
+        evidence_json=latest_analysis.evidence_json if latest_analysis else None,
+        analysis_quality=analysis_quality,
     )
 
 
@@ -356,6 +432,30 @@ async def analyze_profile(profile_id: int, db: Session = Depends(get_db)):
     return report
 
 
+@router.post("/profiles/{profile_id}/pipeline/analyze", response_model=ProfilePipelineResponse)
+async def analyze_profile_pipeline(
+    profile_id: int,
+    req: ProfilePipelineOptions | None = None,
+    db: Session = Depends(get_db),
+):
+    logger.info("pipeline analyze requested profile_id=%s step=start", profile_id)
+    result = await run_profile_analysis_pipeline(
+        db=db,
+        profile_id=profile_id,
+        options=req.model_dump() if req else None,
+    )
+    logger.info(
+        "pipeline analyze completed profile_id=%s status=%s errors=%s warnings=%s",
+        profile_id,
+        result.get("pipeline_status"),
+        len(result.get("errors", [])),
+        len(result.get("warnings", [])),
+    )
+    if result.get("pipeline_status") == "failed" and "人物档案不存在" in result.get("errors", []):
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    return result
+
+
 @router.get("/profiles/{profile_id}/analysis", response_model=list[AnalysisResponse])
 async def list_analyses(profile_id: int, db: Session = Depends(get_db)):
     analyses = (
@@ -390,6 +490,8 @@ async def chat(profile_id: int, req: ChatRequest, db: Session = Depends(get_db))
         profile_name=profile.name if profile else "",
         retrieved_count=result["retrieved_count"],
         model_used=result["model_used"],
+        retrieval_method=result.get("retrieval_method", "keyword"),
+        retrieved_chunks=result.get("retrieved_chunks", []),
     )
 
 
@@ -403,6 +505,579 @@ async def list_chat_messages(profile_id: int, db: Session = Depends(get_db)):
         .all()
     )
     return messages
+
+
+# ── Vector Retrieval ──
+
+@router.post("/profiles/{profile_id}/vector/rebuild", response_model=VectorRebuildResponse)
+async def rebuild_profile_vectors(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    status = detect_vector()
+    if not status.installed:
+        return VectorRebuildResponse(
+            indexed=0,
+            error=status.error or "vector dependencies not installed",
+            detail="向量检索依赖未安装。请运行: pip install qdrant-client fastembed",
+        )
+    if not status.enabled:
+        return VectorRebuildResponse(
+            indexed=0,
+            error="VECTOR_ENABLED=false",
+            detail="向量检索未启用。请在 .env 中设置 VECTOR_ENABLED=true 并重启后端。",
+        )
+    if not status.available:
+        return VectorRebuildResponse(
+            indexed=0,
+            error=status.error or "vector unavailable",
+            detail="向量检索初始化失败，当前仍使用关键词检索 fallback。",
+        )
+
+    rows = (
+        db.query(Chunk, Document.filename, Document.parser)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .all()
+    )
+    chunks = [
+        {
+            "chunk_id": chunk.id,
+            "document_id": chunk.document_id,
+            "profile_id": profile_id,
+            "filename": filename,
+            "chunk_index": chunk.chunk_index,
+            "parser": doc_parser or chunk.parser or "builtin",
+            "char_count": chunk.char_count,
+            "created_at": chunk.created_at.isoformat() if chunk.created_at else "",
+            "content": chunk.content,
+        }
+        for chunk, filename, doc_parser in rows
+    ]
+
+    try:
+        result = index_chunks(profile_id, chunks)
+    except Exception as e:
+        logger.exception("Vector rebuild failed for profile %s", profile_id)
+        return VectorRebuildResponse(
+            indexed=0,
+            error=str(e),
+            detail="向量索引重建失败，当前仍可使用关键词检索 fallback。",
+        )
+
+    return VectorRebuildResponse(
+        indexed=int(result.get("indexed", 0)),
+        error=result.get("error"),
+        detail=f"已重建 {int(result.get('indexed', 0))} 个文本片段的向量索引。",
+    )
+
+
+@router.get("/profiles/{profile_id}/vector/search", response_model=VectorSearchResponse)
+async def search_profile_vectors(profile_id: int, query: str = "", db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    if not query.strip():
+        return VectorSearchResponse(query="", retrieval_method="keyword", results=[], total=0)
+
+    from app.services.profile_service import search_relevant_chunks
+
+    results, method = search_relevant_chunks(db, profile_id, query, top_k=settings.vector_top_k)
+    return VectorSearchResponse(
+        query=query,
+        retrieval_method=method,
+        results=results,
+        total=len(results),
+    )
+
+
+# ── Skill Foundry ──
+
+@router.get("/profiles/{profile_id}/skills", response_model=list[GeneratedSkillResponse])
+async def list_profile_generated_skills(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    rows = (
+        db.query(GeneratedSkill)
+        .filter(GeneratedSkill.profile_id == profile_id)
+        .order_by(GeneratedSkill.created_at.desc())
+        .all()
+    )
+    return [generated_skill_to_dict(row) for row in rows]
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}", response_model=GeneratedSkillResponse)
+async def get_profile_generated_skill(profile_id: int, skill_id: int, db: Session = Depends(get_db)):
+    row = (
+        db.query(GeneratedSkill)
+        .filter(GeneratedSkill.id == skill_id, GeneratedSkill.profile_id == profile_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="生成的 Skill 不存在")
+    return generated_skill_to_dict(row)
+
+
+@router.post("/profiles/{profile_id}/skills/nuwa/generate", response_model=SkillGenerateResponse)
+async def generate_nuwa_skill(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    result = nuwa_skill_adapter.generate_profile_skill(db, profile_id)
+    row = result.get("skill")
+    return SkillGenerateResponse(
+        generated=bool(result.get("generated")),
+        skill=generated_skill_to_dict(row) if row else None,
+        detail=result.get("detail", ""),
+        error=result.get("error"),
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/colleague/generate", response_model=SkillGenerateResponse)
+async def generate_colleague_skill(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+    result = colleague_skill_adapter.generate_profile_skill(db, profile_id)
+    row = result.get("skill")
+    return SkillGenerateResponse(
+        generated=bool(result.get("generated")),
+        skill=generated_skill_to_dict(row) if row else None,
+        detail=result.get("detail", ""),
+        error=result.get("error"),
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/nuwa/validate", response_model=SkillValidationResponse)
+async def validate_latest_nuwa_skill(profile_id: int, db: Session = Depends(get_db)):
+    row = _latest_generated_skill_by_type(db, profile_id, "nuwa")
+    result = validate_skill_package(row.output_path)
+    _persist_validation(db, row, result)
+    return _validation_response(result, row)
+
+
+@router.post("/profiles/{profile_id}/skills/colleague/validate", response_model=SkillValidationResponse)
+async def validate_latest_colleague_skill(profile_id: int, db: Session = Depends(get_db)):
+    row = _latest_generated_skill_by_type(db, profile_id, "colleague")
+    result = validate_skill_package(row.output_path)
+    _persist_validation(db, row, result)
+    return _validation_response(result, row)
+
+
+def _get_generated_skill_row(db: Session, profile_id: int, skill_id: int) -> GeneratedSkill:
+    row = (
+        db.query(GeneratedSkill)
+        .filter(GeneratedSkill.id == skill_id, GeneratedSkill.profile_id == profile_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="生成的 Skill 不存在")
+    return row
+
+
+def _latest_generated_skill_by_type(db: Session, profile_id: int, skill_type: str) -> GeneratedSkill:
+    row = (
+        db.query(GeneratedSkill)
+        .filter(GeneratedSkill.profile_id == profile_id, GeneratedSkill.skill_type == skill_type)
+        .order_by(GeneratedSkill.created_at.desc())
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"尚未生成 {skill_type} Skill 包")
+    return row
+
+
+def _persist_validation(db: Session, row: GeneratedSkill, result: dict) -> None:
+    if not row.l5c_passed:
+        row.validation_status = result.get("level", "L4-compatible-generated")
+    row.validation_score = int(result.get("validation_score", 0) or 0)
+    row.validation_passed_checks_json = json.dumps(result.get("passed_checks", []), ensure_ascii=False)
+    row.validation_errors_json = json.dumps(result.get("errors", []), ensure_ascii=False)
+    row.validation_warnings_json = json.dumps(result.get("warnings", []), ensure_ascii=False)
+    row.runtime_simulated = 1 if result.get("runtime_simulated") else int(row.runtime_simulated or 0)
+    row.actual_runtime_invoked = 1 if result.get("actual_runtime_invoked") else int(row.actual_runtime_invoked or 0)
+    row.last_validated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+
+
+def _validation_response(result: dict, row: GeneratedSkill | None = None) -> SkillValidationResponse:
+    return SkillValidationResponse(
+        validation_score=int(result.get("validation_score", row.validation_score if row else 0) or 0),
+        runtime_ready=bool(result.get("runtime_ready", False)),
+        level=result.get("level", row.validation_status if row else "L4-compatible-generated"),
+        passed_checks=result.get("passed_checks", []),
+        warnings=result.get("warnings", []),
+        errors=result.get("errors", []),
+        runtime_simulated=bool(result.get("runtime_simulated", row.runtime_simulated if row else False)),
+        actual_runtime_invoked=bool(result.get("actual_runtime_invoked", row.actual_runtime_invoked if row else False)),
+        install_instructions_path=(row.install_instructions_path if row else "") or result.get("install_instructions_path", ""),
+        simulated_output=result.get("simulated_output"),
+        used_files=result.get("used_files", []),
+        error=result.get("error"),
+    )
+
+
+def _runtime_result_to_response(row: RuntimeValidationResult) -> RuntimeResultResponse:
+    return RuntimeResultResponse(
+        id=row.id,
+        generated_skill_id=row.generated_skill_id,
+        profile_id=row.profile_id,
+        skill_type=row.skill_type,
+        runtime_target=row.runtime_target,
+        tester_note=row.tester_note or "",
+        test_output_text=row.test_output_text or "",
+        score=row.score or 0,
+        passed=bool(row.passed),
+        failed_cases=json.loads(row.failed_cases_json or "[]"),
+        warnings=json.loads(row.warnings_json or "[]"),
+        evidence_of_runtime=row.evidence_of_runtime or "",
+        created_at=row.created_at,
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/compare-run", response_model=SkillCompareRunResponse)
+async def compare_generated_skills_in_website(
+    profile_id: int,
+    req: SkillCompareRunRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = await compare_skill_runs(
+            db,
+            profile_id=profile_id,
+            nuwa_skill_id=req.nuwa_skill_id,
+            colleague_skill_id=req.colleague_skill_id,
+            user_prompt=req.user_prompt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return SkillCompareRunResponse(**result)
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/run", response_model=SkillRuntimeRunResponse)
+async def run_generated_skill_in_website(
+    profile_id: int,
+    skill_id: int,
+    req: SkillWebsiteRunRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = await run_skill_in_website(
+            db,
+            profile_id=profile_id,
+            skill_id=skill_id,
+            user_prompt=req.user_prompt,
+            runtime_mode=req.runtime_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return SkillRuntimeRunResponse(**result)
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/runs", response_model=list[SkillRuntimeRunResponse])
+async def list_generated_skill_website_runs(
+    profile_id: int,
+    skill_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_generated_skill_row(db, profile_id, skill_id)
+    return [SkillRuntimeRunResponse(**item) for item in list_skill_runtime_runs(db, profile_id, skill_id)]
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/runs/{run_id}", response_model=SkillRuntimeRunResponse)
+async def get_generated_skill_website_run(
+    profile_id: int,
+    skill_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_generated_skill_row(db, profile_id, skill_id)
+    try:
+        result = get_skill_runtime_run(db, profile_id, skill_id, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return SkillRuntimeRunResponse(**result)
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/runs/{run_id}/feedback", response_model=SkillRuntimeFeedbackResponse)
+async def submit_generated_skill_website_run_feedback(
+    profile_id: int,
+    skill_id: int,
+    run_id: int,
+    req: SkillRuntimeFeedbackRequest,
+    db: Session = Depends(get_db),
+):
+    _get_generated_skill_row(db, profile_id, skill_id)
+    try:
+        result = submit_skill_runtime_feedback(
+            db,
+            profile_id=profile_id,
+            skill_id=skill_id,
+            run_id=run_id,
+            rating=req.rating,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return SkillRuntimeFeedbackResponse(**result)
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/validate", response_model=SkillValidationResponse)
+async def validate_generated_skill(profile_id: int, skill_id: int, db: Session = Depends(get_db)):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    result = validate_skill_package(row.output_path)
+    _persist_validation(db, row, result)
+    return _validation_response(result, row)
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/validation", response_model=SkillValidationResponse)
+async def get_generated_skill_validation(profile_id: int, skill_id: int, db: Session = Depends(get_db)):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    return _validation_response(
+        {
+            "validation_score": row.validation_score or 0,
+            "runtime_ready": (row.validation_status or "").startswith("L5"),
+            "level": row.validation_status or "not_validated",
+            "passed_checks": json.loads(row.validation_passed_checks_json or "[]"),
+            "warnings": json.loads(row.validation_warnings_json or "[]"),
+            "errors": json.loads(row.validation_errors_json or "[]"),
+            "runtime_simulated": bool(row.runtime_simulated),
+            "actual_runtime_invoked": bool(row.actual_runtime_invoked),
+        },
+        row,
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/dry-run", response_model=SkillValidationResponse)
+async def dry_run_generated_skill(
+    profile_id: int,
+    skill_id: int,
+    req: SkillDryRunRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    validation = validate_skill_package(row.output_path)
+    dry = await dry_run_skill_execution(
+        row.output_path,
+        (req.test_prompt if req else "请说明你会如何使用 evidence_policy，并指出资料不足时应该如何回答。"),
+    )
+    output_path = os.path.join(row.output_path, "runtime_dry_run_output.md")
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("# Runtime Dry Run Output\n\n")
+            f.write(f"- runtime_simulated: {bool(dry.get('runtime_simulated'))}\n")
+            f.write("- actual_runtime_invoked: false\n")
+            f.write(f"- used_files: {', '.join(dry.get('used_files', []))}\n\n")
+            f.write(dry.get("simulated_output") or "")
+        row.runtime_test_output_path = output_path
+    except Exception as e:
+        dry.setdefault("warnings", []).append(f"dry-run output 写入失败: {e}")
+
+    level = "L5-dry-run-simulated" if dry.get("runtime_simulated") else validation.get("level", "L4-compatible-generated")
+    result = {
+        **validation,
+        "level": level,
+        "runtime_simulated": bool(dry.get("runtime_simulated")),
+        "actual_runtime_invoked": False,
+        "simulated_output": dry.get("simulated_output"),
+        "used_files": dry.get("used_files", []),
+        "warnings": list(validation.get("warnings", [])) + list(dry.get("warnings", [])),
+        "errors": list(validation.get("errors", [])),
+        "error": dry.get("error"),
+    }
+    _persist_validation(db, row, result)
+    return _validation_response(result, row)
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/install-instructions", response_model=SkillValidationResponse)
+async def generated_skill_install_instructions(
+    profile_id: int,
+    skill_id: int,
+    target: str = "generic_agent_skill",
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    result = prepare_runtime_install_bundle(row.output_path, target)
+    row.install_instructions_path = result.get("instructions_path", "")
+    db.commit()
+    db.refresh(row)
+    return _validation_response(
+        {
+            "validation_score": row.validation_score or 0,
+            "level": row.validation_status or "L4-compatible-generated",
+            "warnings": result.get("warnings", []),
+            "errors": [],
+            "install_instructions_path": row.install_instructions_path,
+            "runtime_simulated": bool(row.runtime_simulated),
+            "actual_runtime_invoked": bool(row.actual_runtime_invoked),
+        },
+        row,
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/runtime-testcases", response_model=RuntimeTestCasesResponse)
+async def create_generated_skill_runtime_testcases(
+    profile_id: int,
+    skill_id: int,
+    req: RuntimeTestCaseRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    result = generate_runtime_test_cases(
+        row.output_path,
+        row.skill_type,
+        req.runtime_target if req else "codex",
+    )
+    return RuntimeTestCasesResponse(**result)
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/runtime-testcases", response_model=RuntimeTestCasesResponse)
+async def get_generated_skill_runtime_testcases(
+    profile_id: int,
+    skill_id: int,
+    runtime_target: str = "codex",
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    payload = load_runtime_test_cases(row.output_path)
+    cases = payload.get("test_cases", [])
+    md_path = os.path.join(row.output_path, "runtime_test_cases.md")
+    json_path = os.path.join(row.output_path, "runtime_test_cases.json")
+    if not cases:
+        result = generate_runtime_test_cases(row.output_path, row.skill_type, runtime_target)
+        return RuntimeTestCasesResponse(**result)
+    return RuntimeTestCasesResponse(
+        runtime_target=payload.get("runtime_target", runtime_target),
+        markdown_path=md_path if os.path.exists(md_path) else "",
+        json_path=json_path if os.path.exists(json_path) else "",
+        test_cases=cases,
+        warnings=[],
+    )
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/runtime-results", response_model=RuntimeResultResponse)
+async def submit_generated_skill_runtime_result(
+    profile_id: int,
+    skill_id: int,
+    req: RuntimeResultSubmitRequest,
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    result = RuntimeValidationResult(
+        generated_skill_id=row.id,
+        profile_id=profile_id,
+        skill_type=row.skill_type,
+        runtime_target=req.runtime_target,
+        tester_note=req.tester_note,
+        test_output_text=req.test_output_text,
+        score=0,
+        passed=0,
+        failed_cases_json="[]",
+        warnings_json=json.dumps(["尚未评估；请点击评估运行结果。"], ensure_ascii=False),
+        evidence_of_runtime=req.evidence_of_runtime,
+    )
+    db.add(result)
+    db.commit()
+    db.refresh(result)
+    return _runtime_result_to_response(result)
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/runtime-results", response_model=list[RuntimeResultResponse])
+async def list_generated_skill_runtime_results(profile_id: int, skill_id: int, db: Session = Depends(get_db)):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    results = (
+        db.query(RuntimeValidationResult)
+        .filter(RuntimeValidationResult.profile_id == profile_id, RuntimeValidationResult.generated_skill_id == row.id)
+        .order_by(RuntimeValidationResult.created_at.desc())
+        .all()
+    )
+    return [_runtime_result_to_response(item) for item in results]
+
+
+@router.post("/profiles/{profile_id}/skills/{skill_id}/runtime-results/evaluate", response_model=RuntimeEvaluationResponse)
+async def evaluate_generated_skill_runtime_result(
+    profile_id: int,
+    skill_id: int,
+    req: RuntimeResultSubmitRequest,
+    db: Session = Depends(get_db),
+):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    if not os.path.exists(os.path.join(row.output_path, "runtime_test_cases.json")):
+        generate_runtime_test_cases(row.output_path, row.skill_type, req.runtime_target)
+    evaluation = await evaluate_runtime_result(
+        row.output_path,
+        req.runtime_target,
+        req.test_output_text,
+        req.tester_note,
+    )
+    result = RuntimeValidationResult(
+        generated_skill_id=row.id,
+        profile_id=profile_id,
+        skill_type=row.skill_type,
+        runtime_target=req.runtime_target,
+        tester_note=req.tester_note,
+        test_output_text=req.test_output_text,
+        score=int(evaluation.get("score", 0) or 0),
+        passed=1 if evaluation.get("can_mark_l5c") else 0,
+        failed_cases_json=json.dumps(evaluation.get("failed_cases", []), ensure_ascii=False),
+        warnings_json=json.dumps(evaluation.get("warnings", []), ensure_ascii=False),
+        evidence_of_runtime=req.evidence_of_runtime,
+    )
+    db.add(result)
+    db.commit()
+    db.refresh(result)
+
+    if evaluation.get("can_mark_l5c"):
+        row.l5c_runtime_target = req.runtime_target
+        row.l5c_passed = 1
+        row.l5c_score = int(evaluation.get("score", 0) or 0)
+        row.l5c_result_id = result.id
+        row.l5c_validated_at = datetime.now(timezone.utc)
+        row.validation_status = "L5c-actual-runtime-tested"
+        row.actual_runtime_invoked = 1
+        db.commit()
+        db.refresh(row)
+
+    return RuntimeEvaluationResponse(
+        result_id=result.id,
+        score=int(evaluation.get("score", 0) or 0),
+        passed=bool(evaluation.get("passed", False)),
+        failed_cases=evaluation.get("failed_cases", []),
+        warnings=evaluation.get("warnings", []),
+        recommended_fix=evaluation.get("recommended_fix", ""),
+        can_mark_l5c=bool(evaluation.get("can_mark_l5c", False)),
+        judgeable_cases=int(evaluation.get("judgeable_cases", 0) or 0),
+        safety_boundary_passed=bool(evaluation.get("safety_boundary_passed", False)),
+        evidence_policy_passed=bool(evaluation.get("evidence_policy_passed", False)),
+    )
+
+
+@router.get("/profiles/{profile_id}/skills/{skill_id}/download")
+async def download_generated_skill(profile_id: int, skill_id: int, db: Session = Depends(get_db)):
+    row = _get_generated_skill_row(db, profile_id, skill_id)
+    if not row.output_path or not os.path.isdir(row.output_path):
+        raise HTTPException(status_code=404, detail="生成目录不存在，请重新生成。")
+
+    base_dir = os.path.abspath(row.output_path)
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(base_dir):
+            for filename in files:
+                path = os.path.abspath(os.path.join(root, filename))
+                if not path.startswith(base_dir):
+                    continue
+                arcname = os.path.relpath(path, base_dir)
+                zf.write(path, arcname)
+    buffer.seek(0)
+    filename = f"{row.skill_type}_skill_profile_{profile_id}_{skill_id}.zip"
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Memory (mem0) ──
@@ -483,6 +1158,11 @@ async def delete_document(profile_id: int, document_id: int, db: Session = Depen
     filename = doc.filename
     db.delete(doc)
     db.commit()
+
+    try:
+        delete_document_vectors(profile_id, document_id)
+    except Exception as e:
+        logger.warning("Vector cleanup skipped for profile=%s document=%s: %s", profile_id, document_id, e)
 
     logger.info(f"Deleted document {document_id} ({filename}) for profile {profile_id}")
     return MessageResponse(
@@ -600,6 +1280,43 @@ async def preview_document(profile_id: int, document_id: int, db: Session = Depe
     }
 
 
+# ── Analysis Quality ──
+
+@router.get("/profiles/{profile_id}/quality")
+async def get_analysis_quality(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    quality = calculate_analysis_quality(db, profile_id)
+    chunks = (
+        db.query(Chunk, Document.filename, Document.parser, Document.file_type)
+        .join(Document, Chunk.document_id == Document.id)
+        .filter(Chunk.profile_id == profile_id)
+        .all()
+    )
+
+    # Build enriched chunk list
+    chunk_list = []
+    for chunk, filename, doc_parser, file_type in chunks[:20]:
+        chunk_list.append({
+            "chunk_id": chunk.id,
+            "document_id": chunk.document_id,
+            "filename": filename,
+            "chunk_index": chunk.chunk_index,
+            "content_preview": chunk.content[:200],
+            "char_count": chunk.char_count,
+            "parser": doc_parser or chunk.parser or "builtin",
+        })
+
+    return {
+        "profile_id": profile_id,
+        "profile_name": profile.name,
+        "quality": quality,
+        "sample_chunks": chunk_list,
+    }
+
+
 # ── Export ──
 
 @router.get("/profiles/{profile_id}/export/skill-card")
@@ -618,6 +1335,26 @@ async def export_profile_skill_card(profile_id: int, db: Session = Depends(get_d
         "profile_name": profile.name,
         "format": "markdown",
         "filename": f"SKILL_{profile.name}.md",
+        "content": markdown,
+    }
+
+
+@router.get("/profiles/{profile_id}/export/analysis-report")
+async def export_analysis_report_endpoint(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(Profile).filter(Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="人物档案不存在")
+
+    try:
+        markdown = export_analysis_report(db, profile_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "profile_id": profile_id,
+        "profile_name": profile.name,
+        "format": "markdown",
+        "filename": f"analysis_report_{profile.name}.md",
         "content": markdown,
     }
 

@@ -22,8 +22,10 @@ data/uploads/
 data/mineru_output/
 data/parsed/
 data/chroma/
+data/qdrant/
 data/*.sqlite
 data/*.sqlite3
+generated_skills/
 
 # logs/cache
 *.log
