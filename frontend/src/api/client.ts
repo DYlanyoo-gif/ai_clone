@@ -240,6 +240,11 @@ export const uploadDocument = (profileId: number, file: File) => {
   });
 };
 
+export const uploadTextAsDocument = (profileId: number, text: string, filename: string) => {
+  const file = new File([text], filename, { type: 'text/plain;charset=utf-8' });
+  return uploadDocument(profileId, file);
+};
+
 export const listDocuments = (profileId: number) => request<Document[]>(`/profiles/${profileId}/documents`);
 
 // Analysis APIs

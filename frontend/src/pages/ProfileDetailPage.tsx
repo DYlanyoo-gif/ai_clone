@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import {
-  getProfile, uploadDocument, listDocuments,
+  getProfile, uploadDocument, uploadTextAsDocument, listDocuments,
   runProfilePipeline, type Profile, type Document,
   getConfigStatus, exportSkillCard, exportDataset,
   getSufficiency, type DataSufficiency, type ConfigStatus,
@@ -78,6 +78,52 @@ const PAGE_NAV_ITEMS = [
 
 type WorkbenchTab = 'overview' | 'runtime' | 'portrait' | 'documents' | 'exports'
 type PortraitFilter = 'all' | 'evidence' | 'insufficient' | 'high' | 'low'
+type DocumentInputMode = 'upload' | 'paste'
+type PasteMeterLevel = 'empty' | 'poor' | 'starter' | 'solid' | 'rich'
+
+const PASTE_CHUNK_SIZE = 800
+
+function getDefaultDocumentInputMode(): DocumentInputMode {
+  if (typeof window === 'undefined') return 'upload'
+  if (!window.matchMedia) return 'upload'
+  return window.matchMedia('(max-width: 640px)').matches ? 'paste' : 'upload'
+}
+
+function countTextCharacters(text: string): number {
+  return Array.from(text.trim()).length
+}
+
+function getPasteMeter(charCount: number): { level: PasteMeterLevel; label: string; hint: string; percent: number } {
+  if (charCount <= 0) {
+    return { level: 'empty', label: '等待输入', hint: '直接粘贴聊天记录、文章、客户沟通内容或其他文本资料。', percent: 0 }
+  }
+  if (charCount < 100) {
+    return { level: 'poor', label: '不足', hint: '资料较少，画像可能不稳定', percent: Math.max(8, Math.round(charCount)) }
+  }
+  if (charCount < 1000) {
+    return { level: 'starter', label: '可分析', hint: '资料可用于初步分析', percent: 34 + Math.round((charCount - 100) / 900 * 20) }
+  }
+  if (charCount < 5000) {
+    return { level: 'solid', label: '较充分', hint: '资料较充分，可生成更稳定的画像', percent: 58 + Math.round((charCount - 1000) / 4000 * 26) }
+  }
+  return { level: 'rich', label: '充分', hint: '内容较长，保存后将自动分片', percent: 100 }
+}
+
+function sanitizeDocumentTitle(title: string): string {
+  return title
+    .trim()
+    .replace(/[\\/:*?"<>|#%{}\[\]~`^]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80)
+}
+
+function buildPastedFilename(profileId: number, title: string): string {
+  const cleanTitle = sanitizeDocumentTitle(title)
+  if (cleanTitle) return `${cleanTitle}.txt`
+  return `pasted-profile-${profileId}-${Date.now()}.txt`
+}
 
 const WORKBENCH_TABS: { id: WorkbenchTab; label: string; hint: string }[] = [
   { id: 'overview', label: '总览', hint: '状态与下一步' },
@@ -213,6 +259,12 @@ export default function ProfileDetailPage() {
   const [success, setSuccess] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [documentInputMode, setDocumentInputMode] = useState<DocumentInputMode>(() => getDefaultDocumentInputMode())
+  const [pasteTitle, setPasteTitle] = useState('')
+  const [pasteText, setPasteText] = useState('')
+  const [pasteSaving, setPasteSaving] = useState(false)
+  const [pasteNotice, setPasteNotice] = useState('')
+  const [pasteHighlighted, setPasteHighlighted] = useState(false)
   const [exporting, setExporting] = useState('')
   const [copied, setCopied] = useState('')
   const [pipelineResult, setPipelineResult] = useState<ProfilePipelineResult | null>(null)
@@ -260,6 +312,8 @@ export default function ProfileDetailPage() {
   const [portraitFilter, setPortraitFilter] = useState<PortraitFilter>('all')
   const [portraitDrawer, setPortraitDrawer] = useState<{ title: string; content: string; moduleNo: string; evidence: EvidenceModule | null } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const pasteTextRef = useRef<HTMLTextAreaElement>(null)
+  const pasteHighlightTimerRef = useRef<number | null>(null)
   const runtimePromptRef = useRef<HTMLTextAreaElement>(null)
   const pipelineTimerRef = useRef<number | null>(null)
 
@@ -274,6 +328,10 @@ export default function ProfileDetailPage() {
   })()
   const latestNuwaSkill = generatedSkills.find(s => s.skill_type === 'nuwa')
   const latestColleagueSkill = generatedSkills.find(s => s.skill_type === 'colleague')
+  const pastedCharCount = countTextCharacters(pasteText)
+  const pastedChunkEstimate = pastedCharCount > 0 ? Math.max(1, Math.ceil(pastedCharCount / PASTE_CHUNK_SIZE)) : 0
+  const pasteMeter = getPasteMeter(pastedCharCount)
+  const canSavePastedText = pastedCharCount > 0 && !pasteSaving && !uploading
 
   const refreshWebsiteRuns = useCallback(async () => {
     if (!isValidId) return
@@ -363,6 +421,7 @@ export default function ProfileDetailPage() {
   useEffect(() => {
     return () => {
       if (pipelineTimerRef.current) window.clearInterval(pipelineTimerRef.current)
+      if (pasteHighlightTimerRef.current) window.clearTimeout(pasteHighlightTimerRef.current)
     }
   }, [])
 
@@ -473,6 +532,76 @@ export default function ProfileDetailPage() {
     } finally {
       setUploading(false)
       setUploadingFileName('')
+    }
+  }
+
+  const highlightPasteComposer = () => {
+    setPasteHighlighted(true)
+    if (pasteHighlightTimerRef.current) window.clearTimeout(pasteHighlightTimerRef.current)
+    pasteHighlightTimerRef.current = window.setTimeout(() => setPasteHighlighted(false), 900)
+  }
+
+  const handleReadClipboard = async () => {
+    setError('')
+    setPasteNotice('')
+    if (!navigator.clipboard?.readText) {
+      setPasteNotice('当前浏览器不允许直接读取剪贴板，请手动长按粘贴。')
+      pasteTextRef.current?.focus()
+      return
+    }
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) {
+        setPasteNotice('剪贴板里暂时没有可读取的文本，请手动粘贴。')
+        pasteTextRef.current?.focus()
+        return
+      }
+      setPasteText(text)
+      setPasteNotice('已从剪贴板读取文本。')
+      highlightPasteComposer()
+      requestAnimationFrame(() => pasteTextRef.current?.focus())
+    } catch {
+      setPasteNotice('当前浏览器不允许直接读取剪贴板，请手动长按粘贴。')
+      pasteTextRef.current?.focus()
+    }
+  }
+
+  const handleClearPastedText = () => {
+    setPasteTitle('')
+    setPasteText('')
+    setPasteNotice('')
+    pasteTextRef.current?.focus()
+  }
+
+  const handleSavePastedText = async () => {
+    const text = pasteText.trim()
+    if (!text || pasteSaving) return
+    const filename = buildPastedFilename(profileId, pasteTitle)
+    try {
+      setPasteSaving(true)
+      setError('')
+      setSuccess('')
+      setPasteNotice('')
+      await uploadTextAsDocument(profileId, text, filename)
+      setSuccess('文本资料已保存')
+      setPasteTitle('')
+      setPasteText('')
+      await fetchData()
+    } catch (e: any) {
+      setError(e?.message || '保存文本资料失败，请稍后重试。')
+    } finally {
+      setPasteSaving(false)
+    }
+  }
+
+  const handlePastedTextKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault()
+      if (canSavePastedText) handleSavePastedText()
+    }
+    if (event.key === 'Escape') {
+      setPasteNotice('')
+      event.currentTarget.blur()
     }
   }
 
@@ -1766,7 +1895,7 @@ export default function ProfileDetailPage() {
         <div className="section-title" style={{ marginTop: 0 }}>
           <div>
             <h2>资料管理</h2>
-            <p>上传、预览、删除或重建文本片段；复杂文档会自动解析为可分析文本。</p>
+            <p>上传文件，或直接粘贴文本内容作为分析资料。</p>
           </div>
         </div>
 
@@ -1793,31 +1922,118 @@ export default function ProfileDetailPage() {
           </div>
         )}
 
-        <div
-          className={`upload-zone ${uploading ? 'dragover' : ''}`}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('dragover') }}
-          onDragLeave={e => e.currentTarget.classList.remove('dragover')}
-          onDrop={e => {
-            e.preventDefault()
-            e.currentTarget.classList.remove('dragover')
-            handleUpload(e.dataTransfer.files)
-          }}
-        >
-          {uploading ? (
-            <p>
-              <span className="spinner" />
-              {isMineruFile(uploadingFileName)
-                ? ' 正在调用 MinerU 解析，可能需要较长时间...'
-                : ' 上传处理中...'}
-            </p>
-          ) : (
-            <p>拖拽文件到此处，或点击选择文件<br />
-              <span style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)' }}>
-                支持 txt / md / json / csv / pdf / docx / pptx / xlsx / png / jpg / webp
-              </span>
-            </p>
-          )}
+        <div className="document-input-shell">
+          <div className="document-mode-tabs" role="tablist" aria-label="资料输入模式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={documentInputMode === 'upload'}
+              className={documentInputMode === 'upload' ? 'active' : ''}
+              onClick={() => setDocumentInputMode('upload')}
+            >
+              上传文件
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={documentInputMode === 'paste'}
+              className={documentInputMode === 'paste' ? 'active' : ''}
+              onClick={() => setDocumentInputMode('paste')}
+            >
+              粘贴文本
+            </button>
+          </div>
+
+          <div className={`document-mode-panel ${documentInputMode === 'paste' ? 'is-paste' : 'is-upload'}`}>
+            {documentInputMode === 'upload' ? (
+              <div
+                className={`upload-zone compact ${uploading ? 'dragover' : ''}`}
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('dragover') }}
+                onDragLeave={e => e.currentTarget.classList.remove('dragover')}
+                onDrop={e => {
+                  e.preventDefault()
+                  e.currentTarget.classList.remove('dragover')
+                  handleUpload(e.dataTransfer.files)
+                }}
+              >
+                {uploading ? (
+                  <p>
+                    <span className="spinner" />
+                    {isMineruFile(uploadingFileName)
+                      ? ' 正在调用 MinerU 解析，可能需要较长时间...'
+                      : ' 上传处理中...'}
+                  </p>
+                ) : (
+                  <p>拖拽文件到此处，或点击选择文件<br />
+                    <span style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)' }}>
+                      支持 txt / md / json / csv / pdf / docx / pptx / xlsx / png / jpg / webp
+                    </span>
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className={`paste-composer ${pasteHighlighted ? 'highlight' : ''}`}>
+                <div className="paste-composer-head">
+                  <div>
+                    <h3>快速录入</h3>
+                    <p>直接粘贴聊天记录、文章、客户沟通内容或其他文本资料。</p>
+                  </div>
+                  <span className={`badge paste-meter-badge ${pasteMeter.level}`}>{pasteMeter.label}</span>
+                </div>
+
+                <label className="paste-field">
+                  <span>标题 / 文件名</span>
+                  <input
+                    value={pasteTitle}
+                    onChange={e => setPasteTitle(e.target.value)}
+                    placeholder="微信聊天记录片段 / 客户沟通记录 / 文章内容"
+                    disabled={pasteSaving}
+                  />
+                </label>
+
+                <label className="paste-field">
+                  <span>文本内容</span>
+                  <textarea
+                    ref={pasteTextRef}
+                    value={pasteText}
+                    onChange={e => {
+                      setPasteText(e.target.value)
+                      if (pasteNotice) setPasteNotice('')
+                    }}
+                    onKeyDown={handlePastedTextKeyDown}
+                    placeholder="直接粘贴聊天记录、文章、客户沟通内容或其他文本资料..."
+                    disabled={pasteSaving}
+                  />
+                </label>
+
+                <div className="paste-meter-card">
+                  <div className="paste-meter-stats">
+                    <span><strong>{pastedCharCount.toLocaleString()}</strong> 字</span>
+                    <span><strong>{pastedChunkEstimate}</strong> chunks</span>
+                    <span>{pasteMeter.hint}</span>
+                  </div>
+                  <div className="paste-mini-track" aria-hidden="true">
+                    <div className={`paste-mini-fill ${pasteMeter.level}`} style={{ width: `${pasteMeter.percent}%` }} />
+                  </div>
+                </div>
+
+                {pasteNotice && <p className="paste-notice">{pasteNotice}</p>}
+
+                <div className="paste-actions">
+                  <button type="button" className="btn-secondary" onClick={handleReadClipboard} disabled={pasteSaving}>
+                    从剪贴板读取
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={handleClearPastedText} disabled={pasteSaving || (!pasteText && !pasteTitle)}>
+                    清空
+                  </button>
+                  <button type="button" className="btn-primary" onClick={handleSavePastedText} disabled={!canSavePastedText}>
+                    {pasteSaving ? <><span className="spinner" /> 保存中</> : '保存为资料'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <input
           ref={fileInputRef}

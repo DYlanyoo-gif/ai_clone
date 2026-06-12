@@ -2256,6 +2256,43 @@ main {
 .mineru-status-banner { margin-bottom: 0.9rem; }
 .mineru-ready { border-color: #ccdcca; background: var(--success-weak); color: var(--success); }
 .mineru-missing { border-color: #ead3a4; background: var(--warning-weak); color: #74500f; }
+.document-input-shell {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  margin-bottom: 1rem;
+}
+.document-mode-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 24rem);
+  gap: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  padding: 0.2rem;
+}
+.document-mode-tabs button {
+  min-height: 2.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-strong);
+  box-shadow: none;
+}
+.document-mode-tabs button:hover {
+  background: rgba(255, 255, 255, 0.54);
+  border-color: transparent;
+}
+.document-mode-tabs button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+.document-mode-panel {
+  min-width: 0;
+  animation: documentModeIn 220ms ease both;
+}
 .upload-zone {
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-md);
@@ -2269,6 +2306,136 @@ main {
 .upload-zone:hover, .upload-zone.dragover {
   border-color: var(--accent);
   background: var(--accent-weak);
+}
+.upload-zone.compact {
+  margin-bottom: 0;
+  padding: 1.15rem;
+}
+.paste-composer {
+  display: grid;
+  gap: 0.78rem;
+  min-width: 0;
+  border: 1px solid rgba(168, 161, 149, 0.78);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(248, 247, 244, 0.92)),
+    var(--surface-soft);
+  box-shadow: var(--shadow-sm);
+  padding: 1rem;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+.paste-composer.highlight {
+  border-color: var(--accent);
+  background:
+    linear-gradient(180deg, rgba(231, 237, 241, 0.92), rgba(248, 247, 244, 0.98)),
+    var(--accent-weak);
+  box-shadow: 0 0 0 3px rgba(37, 71, 101, 0.11), var(--shadow-sm);
+}
+.paste-composer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.paste-composer-head h3 {
+  color: var(--text);
+  font-size: 0.98rem;
+  line-height: 1.2;
+}
+.paste-composer-head p {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-top: 0.18rem;
+}
+.paste-meter-badge.empty { background: var(--surface-strong); color: var(--muted-strong); border-color: var(--border); }
+.paste-meter-badge.poor { background: var(--warning-weak); color: var(--warning); border-color: #ead3a4; }
+.paste-meter-badge.starter { background: var(--accent-weak); color: var(--accent); border-color: #c7d5de; }
+.paste-meter-badge.solid,
+.paste-meter-badge.rich { background: var(--success-weak); color: var(--success); border-color: #ccdcca; }
+.paste-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.paste-field > span {
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+.paste-field textarea {
+  min-height: 260px;
+  max-height: 48vh;
+  line-height: 1.65;
+  resize: vertical;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.paste-field textarea::-webkit-scrollbar {
+  width: 0.55rem;
+}
+.paste-field textarea::-webkit-scrollbar-thumb {
+  border: 0.16rem solid transparent;
+  border-radius: 999px;
+  background: var(--border-strong);
+  background-clip: content-box;
+}
+.paste-meter-card {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 0.72rem;
+}
+.paste-meter-stats {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.paste-meter-stats strong {
+  color: var(--text);
+  font-size: 0.92rem;
+}
+.paste-mini-track {
+  height: 0.5rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-strong);
+}
+.paste-mini-fill {
+  height: 100%;
+  min-width: 0;
+  border-radius: 999px;
+  transition: width 260ms ease, background 180ms ease;
+}
+.paste-mini-fill.empty { background: var(--border-strong); }
+.paste-mini-fill.poor { background: var(--warning); }
+.paste-mini-fill.starter { background: var(--accent); }
+.paste-mini-fill.solid,
+.paste-mini-fill.rich { background: var(--success); }
+.paste-notice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding: 0.55rem 0.65rem;
+}
+.paste-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.1fr);
+  gap: 0.55rem;
+  align-items: center;
+}
+.paste-actions button {
+  min-height: 2.75rem;
+  min-width: 0;
 }
 .file-list { display: grid; gap: 0.55rem; font-size: 0.85rem; }
 .file-item {
@@ -4434,6 +4601,7 @@ main {
 .message-in { animation: messageIn 180ms ease both; }
 
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes documentModeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes modalEnter { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes messageIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -5040,6 +5208,46 @@ main {
   .workbench-panel,
   .admin-gate {
     padding: 0.9rem;
+  }
+  .page-documents-section {
+    padding-bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
+  }
+  .document-mode-tabs {
+    width: 100%;
+  }
+  .document-mode-tabs button {
+    min-height: 2.75rem;
+  }
+  .upload-zone.compact {
+    padding: 0.9rem 0.75rem;
+  }
+  .paste-composer {
+    padding: 0.82rem;
+  }
+  .paste-composer-head {
+    display: grid;
+  }
+  .paste-field textarea {
+    min-height: 220px;
+    max-height: 54vh;
+  }
+  .paste-meter-card {
+    padding: 0.65rem;
+  }
+  .paste-meter-stats {
+    display: grid;
+    gap: 0.28rem;
+  }
+  .paste-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .paste-actions .btn-primary {
+    grid-column: 1 / -1;
+    width: 100%;
+    order: 3;
+  }
+  .paste-actions .btn-secondary {
+    width: 100%;
   }
   .overview-metrics,
   .profile-metrics-grid {
