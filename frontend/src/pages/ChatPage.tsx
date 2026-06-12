@@ -254,23 +254,9 @@ export default function ChatPage() {
               {/* mem0 Status Badge */}
               {mem0Status && (
                 <div style={{ marginTop: '0.5rem' }}>
-                  <span className={`badge chat-provider-badge ${
-                    mem0Status.installed && mem0Status.enabled && mem0Status.available ? 'deepseek' :
-                    mem0Status.available ? 'mock' : 'mock'
-                  }`}>
-                    {mem0Status.installed && mem0Status.enabled && mem0Status.available
-                      ? '长期记忆已启用'
-                      : mem0Status.installed && !mem0Status.available
-                        ? 'mem0 API 不兼容'
-                        : mem0Status.installed && !mem0Status.enabled
-                          ? 'mem0 已安装未启用'
-                          : 'mem0 未安装'}
+                  <span className={`badge chat-provider-badge ${mem0Status.available ? 'deepseek' : 'mock'}`}>
+                    {mem0Status.available ? '记忆增强已启用' : '记忆增强可选'}
                   </span>
-                  {mem0Status.detail && (
-                    <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginTop: '0.35rem' }}>
-                      {mem0Status.detail}
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -280,16 +266,13 @@ export default function ChatPage() {
                   <div className="sufficiency-head" style={{ marginBottom: '0.35rem' }}>
                     <span>RAG 检索方式</span>
                     <span className={vectorStatus.available ? 'badge badge-success' : 'badge badge-muted'}>
-                      {vectorStatus.available ? 'vector' : 'keyword'}
+                      {vectorStatus.available ? '语义增强' : '基础检索'}
                     </span>
                   </div>
                   <p style={{ color: 'var(--muted)', fontSize: '0.75rem' }}>
                     {vectorStatus.available
-                      ? `${vectorStatus.provider} · ${vectorStatus.embedding_model}`
-                      : '当前使用关键词 fallback。启用向量检索后，可提升资料相关问题的证据命中质量。'}
-                  </p>
-                  <p style={{ color: 'var(--muted)', fontSize: '0.72rem', marginTop: '0.3rem' }}>
-                    Collection: {vectorStatus.collection || '未建立'} · {vectorStatus.points_count || 0} points
+                      ? '当前会优先参考语义证据检索，并保留基础检索兜底。'
+                      : '当前使用基础检索。资料量较大时，管理员可启用语义检索增强。'}
                   </p>
                   {lastRetrievalMethod && (
                     <span className="badge badge-info">上次回复: {lastRetrievalMethod}</span>

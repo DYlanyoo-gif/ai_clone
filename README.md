@@ -167,6 +167,26 @@ npm run dev
 
 前端启动后访问 http://localhost:5173。
 
+## Production Deployment
+
+生产环境请使用域名访问，不要把 Vite 开发端口 `5173` 暴露给用户。推荐部署方式：
+
+- `npm run build` 生成 `frontend/dist`
+- Nginx 托管 `frontend/dist`
+- Nginx 将 `/api` 反向代理到 FastAPI `127.0.0.1:8000`
+- FastAPI 后端由 systemd 常驻运行
+- DeepSeek API Key 只放在 VPS 的 `/opt/ai_clone/.env`，不要提交到 GitHub
+- 简历展示或公开 demo 建议开启 Nginx Basic Auth，避免陌生访问消耗 API 额度
+
+部署模板已放在：
+
+- [deploy/nginx.conf.example](deploy/nginx.conf.example)
+- [deploy/systemd-backend.service.example](deploy/systemd-backend.service.example)
+- [.env.production.example](.env.production.example)
+- [deploy/README_DEPLOY.md](deploy/README_DEPLOY.md)
+
+完整 VPS 部署步骤见 [deploy/README_DEPLOY.md](deploy/README_DEPLOY.md)。本地开发仍使用 `http://localhost:5173`，生产访问应使用你的域名，例如 `https://echo.example.com`。
+
 ### 4. 配置 LLM Provider
 
 编辑项目根目录的 `.env` 文件。**默认使用 Mock 模式**（无需 API Key 即可演示）。

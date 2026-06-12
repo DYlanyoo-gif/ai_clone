@@ -64,7 +64,7 @@ const RUNTIME_EXAMPLE_PROMPTS = [
   '这个人遇到复杂选择时会怎么判断？',
   '请基于证据分析这个人的沟通风格。',
   '资料不足时你会如何回答？',
-  'Nuwa 和 Colleague 对同一问题有什么不同？',
+  '两个模拟视角对同一问题有什么不同？',
 ]
 
 const PAGE_NAV_ITEMS = [
@@ -76,15 +76,50 @@ const PAGE_NAV_ITEMS = [
   { id: 'advanced', label: '高级' },
 ]
 
+type WorkbenchTab = 'overview' | 'runtime' | 'portrait' | 'documents' | 'exports'
+type PortraitFilter = 'all' | 'evidence' | 'insufficient' | 'high' | 'low'
+
+const WORKBENCH_TABS: { id: WorkbenchTab; label: string; hint: string }[] = [
+  { id: 'overview', label: '总览', hint: '状态与下一步' },
+  { id: 'runtime', label: '模拟', hint: '思维 / 互动 / 对比' },
+  { id: 'portrait', label: '画像', hint: '14 模块证据画像' },
+  { id: 'documents', label: '资料', hint: '上传与文件管理' },
+  { id: 'exports', label: '导出', hint: '报告与高级导出' },
+]
+
+const HASH_TO_TAB: Record<string, WorkbenchTab> = {
+  overview: 'overview',
+  profile: 'portrait',
+  portrait: 'portrait',
+  runtime: 'runtime',
+  files: 'documents',
+  documents: 'documents',
+  exports: 'exports',
+}
+
+const TAB_TO_HASH: Record<WorkbenchTab, string> = {
+  overview: 'overview',
+  runtime: 'runtime',
+  portrait: 'profile',
+  documents: 'files',
+  exports: 'exports',
+}
+
+function getInitialWorkbenchTab(): WorkbenchTab {
+  if (typeof window === 'undefined') return 'overview'
+  const key = window.location.hash.replace(/^#/, '')
+  return HASH_TO_TAB[key] || 'overview'
+}
+
 type PipelineStepKey = 'parse' | 'analysis' | 'nuwa' | 'colleague' | 'runtime'
 type PipelineUiStatus = PipelineStepStatusName | 'pending'
 
 const PIPELINE_STEPS: { key: PipelineStepKey; title: string; desc: string }[] = [
   { key: 'parse', title: '解析资料', desc: '读取已上传文档和文本片段' },
   { key: 'analysis', title: '生成证据画像', desc: '生成 14 模块画像和证据链' },
-  { key: 'nuwa', title: '蒸馏 Nuwa Skill', desc: '准备思维模拟能力' },
-  { key: 'colleague', title: '蒸馏 Colleague Skill', desc: '准备互动模拟能力' },
-  { key: 'runtime', title: '准备模拟实验台', desc: '验证 Skill 文件并开放站内运行' },
+  { key: 'nuwa', title: '准备思维模拟', desc: '整理思维模拟能力' },
+  { key: 'colleague', title: '准备互动模拟', desc: '整理互动模拟能力' },
+  { key: 'runtime', title: '准备模拟实验台', desc: '开放站内运行入口' },
 ]
 
 const createPipelineSteps = (status: PipelineUiStatus = 'pending') =>
@@ -103,11 +138,11 @@ function isRunnableSkill(skill?: GeneratedSkill): skill is GeneratedSkill {
 }
 
 const RUNTIME_MODE_OPTIONS: { value: SkillRuntimeMode; label: string; hint: string }[] = [
-  { value: 'nuwa_thinking', label: 'Nuwa Thinking', hint: '心智模型与决策启发式' },
-  { value: 'colleague_interaction', label: 'Colleague Interaction', hint: '互动规则与协作方式' },
-  { value: 'evidence_check', label: 'Evidence Check', hint: '证据引用与事实约束' },
-  { value: 'uncertainty_check', label: 'Uncertainty Check', hint: '资料不足时的边界表达' },
-  { value: 'compare', label: 'Compare', hint: '双引擎差异对比' },
+  { value: 'nuwa_thinking', label: '思维模拟', hint: '心智模型与决策启发式' },
+  { value: 'colleague_interaction', label: '互动模拟', hint: '互动规则与协作方式' },
+  { value: 'evidence_check', label: '证据检查', hint: '证据引用与事实约束' },
+  { value: 'uncertainty_check', label: '不确定性检查', hint: '资料不足时的边界表达' },
+  { value: 'compare', label: '对比模拟', hint: '双引擎差异对比' },
 ]
 
 function runtimeModeLabel(mode: SkillRuntimeMode | string): string {
@@ -115,8 +150,8 @@ function runtimeModeLabel(mode: SkillRuntimeMode | string): string {
 }
 
 function skillTypeLabel(type: 'nuwa' | 'colleague' | 'compare'): string {
-  if (type === 'compare') return 'Compare'
-  return type === 'nuwa' ? 'Nuwa' : 'Colleague'
+  if (type === 'compare') return '对比模拟'
+  return type === 'nuwa' ? '思维模拟' : '互动模拟'
 }
 
 function defaultSourceRepo(type: 'nuwa' | 'colleague'): string {
@@ -218,7 +253,12 @@ export default function ProfileDetailPage() {
   const [feedbackExpanded, setFeedbackExpanded] = useState(false)
   const [feedbackBusy, setFeedbackBusy] = useState(false)
   const [evidenceModal, setEvidenceModal] = useState<{ moduleName: string; moduleIndex: string } | null>(null)
-  const [advancedOpen, setAdvancedOpen] = useState(() => localStorage.getItem('profile-detail-advanced-open') === 'true')
+  const [advancedOpen, setAdvancedOpen] = useState(() => localStorage.getItem('profile-detail-advanced-open-v3') === 'true')
+  const [expandedPortraitModules, setExpandedPortraitModules] = useState<Record<string, boolean>>({})
+  const adminView = false
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>(() => getInitialWorkbenchTab())
+  const [portraitFilter, setPortraitFilter] = useState<PortraitFilter>('all')
+  const [portraitDrawer, setPortraitDrawer] = useState<{ title: string; content: string; moduleNo: string; evidence: EvidenceModule | null } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimePromptRef = useRef<HTMLTextAreaElement>(null)
   const pipelineTimerRef = useRef<number | null>(null)
@@ -342,10 +382,53 @@ export default function ProfileDetailPage() {
   }, [profile?.latest_portrait])
 
   useEffect(() => {
-    localStorage.setItem('profile-detail-advanced-open', advancedOpen ? 'true' : 'false')
+    localStorage.setItem('profile-detail-advanced-open-v3', advancedOpen ? 'true' : 'false')
   }, [advancedOpen])
 
+  useEffect(() => {
+    const handleHashChange = () => setActiveWorkbenchTab(getInitialWorkbenchTab())
+    window.addEventListener('hashchange', handleHashChange)
+    return () => window.removeEventListener('hashchange', handleHashChange)
+  }, [])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPortraitDrawer(null)
+        setPreviewDoc(null)
+        setEvidenceModal(null)
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        if (activeWorkbenchTab === 'runtime' && runtimePrompt.trim() && !websiteRuntimeRunning) {
+          event.preventDefault()
+          handleRunWebsiteRuntime()
+        }
+      }
+      if (event.key === '/' && activeWorkbenchTab === 'runtime') {
+        const target = event.target as HTMLElement | null
+        if (target?.tagName !== 'TEXTAREA' && target?.tagName !== 'INPUT') {
+          event.preventDefault()
+          runtimePromptRef.current?.focus()
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [activeWorkbenchTab, runtimePrompt, websiteRuntimeRunning])
+
+  const selectWorkbenchTab = (tab: WorkbenchTab) => {
+    setActiveWorkbenchTab(tab)
+    const hash = TAB_TO_HASH[tab]
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${hash}`)
+  }
+
   const scrollToSection = (sectionId: string) => {
+    const tab = HASH_TO_TAB[sectionId] || (sectionId === 'overview' ? 'overview' : null)
+    if (tab) {
+      selectWorkbenchTab(tab)
+      document.getElementById('workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
     document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
@@ -366,15 +449,14 @@ export default function ProfileDetailPage() {
     // Check MinerU requirement for complex files
     if (isMineruFile(file.name)) {
       if (!mineruStatus?.installed) {
-        setError(
-          '当前未安装 MinerU，无法解析 PDF/DOCX/PPTX/XLSX/图片文件。' +
-          '请先运行: powershell -ExecutionPolicy Bypass -File scripts/install_mineru_windows.ps1，' +
-          '或上传 txt/md/json/csv 文件。'
+        setError(adminView
+          ? '当前未安装 MinerU，无法解析 PDF/DOCX/PPTX/XLSX/图片文件。请先运行管理员安装脚本，或上传 txt/md/json/csv 文件。'
+          : '当前暂不支持解析复杂文档，请上传 txt / md / json / csv 文件，或联系管理员启用复杂文档解析。'
         )
         return
       }
       if (!mineruStatus?.enabled) {
-        setError('MinerU 已安装但未启用。请在 .env 中设置 MINERU_ENABLED=true')
+        setError(adminView ? 'MinerU 已安装但未启用。请在 .env 中设置 MINERU_ENABLED=true' : '复杂文档解析暂未启用，请上传文本资料或联系管理员。')
         return
       }
     }
@@ -525,7 +607,7 @@ export default function ProfileDetailPage() {
       const a = document.createElement('a')
       a.href = url; a.download = result.filename; a.click()
       URL.revokeObjectURL(url)
-      setSuccess('Skill Card 已导出')
+      setSuccess('风格卡已导出')
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -871,7 +953,7 @@ export default function ProfileDetailPage() {
 
       if (runtimeLabSkillType === 'compare') {
         if (!isRunnableSkill(latestNuwaSkill) || !isRunnableSkill(latestColleagueSkill)) {
-          setError('Compare 需要同时生成 Nuwa 和 Colleague Skill 包。')
+        setError('对比模拟需要同时准备思维模拟和互动模拟。')
           return
         }
         setRuntimeBusySkill(latestNuwaSkill.id)
@@ -887,14 +969,14 @@ export default function ProfileDetailPage() {
           [latestNuwaSkill.id]: [result.nuwa_result, ...(prev[latestNuwaSkill.id] || [])].slice(0, 30),
           [latestColleagueSkill.id]: [result.colleague_result, ...(prev[latestColleagueSkill.id] || [])].slice(0, 30),
         }))
-        setSuccess('Nuwa / Colleague 站内对照运行完成。')
+        setSuccess('对比模拟已完成。')
         await refreshWebsiteRuns()
         return
       }
 
       const skill = runtimeLabSkillType === 'nuwa' ? latestNuwaSkill : latestColleagueSkill
       if (!isRunnableSkill(skill)) {
-        setError(`请先生成 ${runtimeLabSkillType === 'nuwa' ? 'Nuwa' : 'Colleague'} Skill 包。`)
+        setError(`请先准备${runtimeLabSkillType === 'nuwa' ? '思维模拟' : '互动模拟'}能力。`)
         return
       }
       setRuntimeBusySkill(skill.id)
@@ -915,9 +997,9 @@ export default function ProfileDetailPage() {
       if (result.status === 'error') {
         setError('模拟运行失败，请查看高级技术详情。')
       } else if (result.status === 'blocked') {
-        setSuccess('站内 Skill Runtime 已完成安全边界拦截。')
+        setSuccess('站内模拟已完成安全边界拦截。')
       } else {
-        setSuccess('站内 Skill Runtime 运行完成。')
+        setSuccess('站内模拟运行完成。')
       }
     } catch (e: any) {
       setError(e.message)
@@ -939,12 +1021,12 @@ export default function ProfileDetailPage() {
 
   const handleRuntimeExamplePrompt = (prompt: string) => {
     setRuntimePrompt(prompt)
-    if (prompt.includes('Nuwa 和 Colleague') || prompt.includes('两个引擎')) {
+    if (prompt.includes('两个模拟视角') || prompt.includes('两个引擎')) {
       if (isRunnableSkill(latestNuwaSkill) && isRunnableSkill(latestColleagueSkill)) {
         setRuntimeLabSkillType('compare')
         setRuntimeLabMode('compare')
       } else {
-        setError('Compare 需要同时生成 Nuwa 与 Colleague Skill 包。')
+        setError('对比模拟需要同时准备思维模拟和互动模拟。')
       }
     } else if (runtimeLabSkillType === 'compare') {
       setRuntimeLabSkillType(isRunnableSkill(latestNuwaSkill) ? 'nuwa' : 'colleague')
@@ -980,7 +1062,7 @@ export default function ProfileDetailPage() {
       )
       setSuccess(
         result.correction_history_appended
-          ? '反馈已记录到 correction history，暂不会自动重写 Skill。'
+          ? '反馈已记录到修正历史，暂不会自动改写模拟能力。'
           : '反馈已记录。'
       )
       setFeedbackNote('')
@@ -1067,10 +1149,34 @@ export default function ProfileDetailPage() {
     )
   }
 
-  const portraitSections = parseMarkdownSections(profile.latest_portrait || '')
+  const portraitSections = parseMarkdownSections(profile.latest_portrait || '').filter(section => /^\d+\./.test(section.title))
   const styleSections = parseStyleCardSections(profile.latest_style_card || '')
   const coverage = profile.analysis_quality?.evidence_coverage ?? 0
   const avgConfidence = profile.analysis_quality?.avg_confidence ?? 0
+  const portraitItems = portraitSections.map(section => {
+    const evidence = getEvidenceForSection(section.title)
+    const moduleNo = (section.title.match(/^(\d+)\./) || ['', ''])[1]
+    const claimCount = evidence?.claims?.length || 0
+    const avgClaimConfidence = claimCount
+      ? Math.round(evidence!.claims.reduce((sum, claim) => sum + (claim.confidence_score || 0), 0) / claimCount)
+      : null
+    return {
+      section,
+      evidence,
+      moduleNo,
+      claimCount,
+      avgClaimConfidence,
+      title: section.title.replace(/^\d+\.\s*/, ''),
+      summary: summarizeEvidenceModule(evidence, section.content),
+    }
+  })
+  const filteredPortraitItems = portraitItems.filter(item => {
+    if (portraitFilter === 'evidence') return Boolean(item.evidence)
+    if (portraitFilter === 'insufficient') return Boolean(item.evidence && !item.evidence.data_sufficient)
+    if (portraitFilter === 'high') return item.avgClaimConfidence !== null && item.avgClaimConfidence >= 75
+    if (portraitFilter === 'low') return item.avgClaimConfidence !== null && item.avgClaimConfidence < 60
+    return true
+  })
   const selectedRuntimeSkill = runtimeLabSkillType === 'nuwa'
     ? latestNuwaSkill
     : runtimeLabSkillType === 'colleague'
@@ -1090,6 +1196,19 @@ export default function ProfileDetailPage() {
     || pipelineResult?.nuwa_skill_id
     || pipelineResult?.colleague_skill_id
   )
+  const overviewChecklist = [
+    { label: '资料已上传', done: profile.document_count > 0 },
+    { label: '画像已生成', done: profile.has_analysis },
+    { label: '模拟已准备', done: simulationReady },
+    { label: '可导出报告', done: profile.has_analysis },
+  ]
+  const nextStepSuggestion = profile.document_count === 0
+    ? '先上传授权资料。'
+    : !profile.has_analysis
+      ? '点击开始分析，生成证据化画像。'
+      : !simulationReady
+        ? '重新分析以准备模拟实验台。'
+        : '可以进入模拟实验台或导出完整报告。'
   const selectedEngineStatus = runtimeLabSkillType === 'nuwa'
     ? nuwaStatus
     : runtimeLabSkillType === 'colleague'
@@ -1116,7 +1235,26 @@ export default function ProfileDetailPage() {
       : 'Not invoked / L5c pending'
 
   return (
-    <div className="profile-detail-page fade-in">
+    <div className={`profile-detail-page workbench-page tab-${activeWorkbenchTab} ${adminView ? 'admin-view' : 'public-view'} fade-in`}>
+      <div id="workbench" className="profile-app-shell page-section-anchor">
+        <aside className="profile-sidebar">
+          <div className="profile-sidebar-card">
+            <span className={simulationReady ? 'badge badge-success' : 'badge badge-muted'}>
+              {simulationReady ? '模拟可用' : '待准备'}
+            </span>
+            <strong>{profile.name}</strong>
+            <p>{profile.document_count} 文件 · {profile.chunk_count} 片段</p>
+          </div>
+          <PageMiniNav
+            items={WORKBENCH_TABS.map(item => ({ id: item.id, label: item.label, hint: item.hint }))}
+            activeSection={activeWorkbenchTab}
+            onSelect={id => selectWorkbenchTab(id as WorkbenchTab)}
+          />
+          <div className="profile-sidebar-note">
+            技术诊断、依赖状态和底层调试信息已隐藏。
+          </div>
+        </aside>
+        <div className="profile-main">
       {/* ── Header Card ── */}
       <div id="overview" className="profile-header-card page-section-anchor page-overview-section">
         <div>
@@ -1152,33 +1290,95 @@ export default function ProfileDetailPage() {
           <div className="profile-metrics-grid">
             <QualityMetric label="文件数" value={String(profile.document_count)} />
             <QualityMetric label="chunk 数" value={String(profile.chunk_count)} />
-            <QualityMetric label="资料字数" value={(profile.total_chars || 0).toLocaleString()} />
             <QualityMetric label="证据覆盖率" value={`${coverage}%`} />
-            <QualityMetric label="平均置信度" value={String(avgConfidence)} />
-            <QualityMetric label="最近更新" value={formatDate(profile.updated_at || profile.created_at)} />
+            <QualityMetric label="模拟状态" value={simulationReady ? '已准备' : '未准备'} />
           </div>
+          <details className="profile-more-metrics">
+            <summary>更多指标</summary>
+            <div className="quality-grid compact-quality-grid">
+              <QualityMetric label="资料字数" value={(profile.total_chars || 0).toLocaleString()} />
+              <QualityMetric label="平均置信度" value={String(avgConfidence)} />
+              <QualityMetric label="最近更新" value={formatDate(profile.updated_at || profile.created_at)} />
+              <QualityMetric label="资料充分度" value={sufficiency ? sufficiency.label : '待评估'} />
+            </div>
+          </details>
         </div>
       </div>
 
       {error && <div className="alert alert-error" style={{ cursor: 'pointer' }} onClick={() => setError('')}>{error} (点击关闭)</div>}
       {success && <div className="alert alert-success" style={{ cursor: 'pointer' }} onClick={() => setSuccess('')}>{success} (点击关闭)</div>}
 
-      <PageMiniNav items={PAGE_NAV_ITEMS} activeSection={activeSection} onSelect={scrollToSection} />
+      <div className="mobile-action-bar" aria-label="快速操作">
+        <button className="btn-secondary" onClick={handleAnalyze} disabled={analyzing || profile.chunk_count === 0}>
+          分析
+        </button>
+        <button className="btn-secondary" onClick={() => selectWorkbenchTab('runtime')}>
+          模拟
+        </button>
+        <button className="btn-primary" onClick={handleExportAnalysisReport} disabled={!profile.has_analysis || exporting === 'analysis-report'}>
+          导出
+        </button>
+      </div>
 
-      <PipelinePanel
-        hasAnalysis={profile.has_analysis}
-        chunkCount={profile.chunk_count}
-        analyzing={analyzing}
-        steps={pipelineSteps}
-        result={pipelineResult}
-        simulationReady={simulationReady}
-        onRun={handleAnalyze}
-      />
+      <section className="card workbench-panel overview-panel page-overview-panel">
+        <div className="section-title" style={{ marginTop: 0 }}>
+          <div>
+            <h2>工作台总览</h2>
+            <p>只展示当前档案最重要的状态和下一步动作。</p>
+          </div>
+          <span className={simulationReady ? 'badge badge-success' : 'badge badge-muted'}>
+            {simulationReady ? '模拟可用' : '模拟未准备'}
+          </span>
+        </div>
+        <div className="overview-grid">
+          <div className="compact-card overview-status-card">
+            <span className={profile.has_analysis ? 'badge badge-success' : 'badge badge-warning'}>
+              {profile.has_analysis ? '分析完成' : '待分析'}
+            </span>
+            <h3>{profile.has_analysis ? '证据化画像已生成' : '还没有生成画像'}</h3>
+            <p>{nextStepSuggestion}</p>
+            <div className="overview-actions">
+              <button className="btn-primary" onClick={handleAnalyze} disabled={analyzing || profile.chunk_count === 0}>
+                {profile.has_analysis ? '重新分析' : '开始分析'}
+              </button>
+              <button className="btn-secondary" onClick={() => selectWorkbenchTab('runtime')}>进入模拟</button>
+            </div>
+          </div>
+          <div className="overview-metrics">
+            <QualityMetric label="资料充分度" value={sufficiency ? sufficiency.label : '待评估'} />
+            <QualityMetric label="证据覆盖率" value={`${coverage}%`} />
+            <QualityMetric label="平均置信度" value={String(avgConfidence)} />
+            <QualityMetric label="文件 / 片段" value={`${profile.document_count} / ${profile.chunk_count}`} />
+          </div>
+          <div className="compact-card checklist-card">
+            <h3>准备情况</h3>
+            <div className="compact-checklist">
+              {overviewChecklist.map(item => (
+                <span key={item.label} className={item.done ? 'done' : ''}>
+                  <b>{item.done ? '✓' : '·'}</b>{item.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {(analyzing || pipelineResult) && (
+        <PipelinePanel
+          hasAnalysis={profile.has_analysis}
+          chunkCount={profile.chunk_count}
+          analyzing={analyzing}
+          steps={pipelineSteps}
+          result={pipelineResult}
+          simulationReady={simulationReady}
+          onRun={handleAnalyze}
+        />
+      )}
 
       <div id="advanced" className="page-section-anchor page-advanced-anchor" />
 
       {/* ── Retrieval Engine Card ── */}
-      {vectorStatus && (
+      {adminView && vectorStatus && (
         <details
           className="card retrieval-card advanced-tech-details page-advanced-section"
           style={{ marginBottom: '1.5rem' }}
@@ -1188,7 +1388,7 @@ export default function ProfileDetailPage() {
           <summary>
             <div>
               <strong>高级检索详情</strong>
-              <span>查看当前证据检索方式、embedding 模型和向量索引状态。</span>
+              <span>管理员 / 高级用户查看当前证据检索方式、embedding 模型和向量索引状态。</span>
             </div>
             <em>{vectorStatus.available ? '语义检索增强' : '基础检索'}</em>
           </summary>
@@ -1241,7 +1441,7 @@ export default function ProfileDetailPage() {
       )}
 
       {/* ── Advanced Technical Details ── */}
-      <details
+      {adminView && <details
         className="card skill-foundry-card advanced-tech-details page-advanced-section"
         style={{ marginBottom: '1.5rem' }}
         open={advancedOpen}
@@ -1250,7 +1450,7 @@ export default function ProfileDetailPage() {
         <summary>
           <div>
             <strong>高级技术详情</strong>
-            <span>GitHub Skill 引擎、结构验证、dry-run、外部 L5c 回填和 ZIP 安装信息。</span>
+            <span>管理员 / 高级用户查看 GitHub Skill 引擎、结构验证、dry-run、外部 L5c 回填和 ZIP 安装信息。</span>
           </div>
           <em>默认折叠</em>
         </summary>
@@ -1410,20 +1610,20 @@ export default function ProfileDetailPage() {
           </div>
         </SkillFoundryLayer>
         </div>
-      </details>
+      </details>}
 
       {/* ── Analysis Quality Card ── */}
       {profile.analysis_quality && (
-        <div className="card page-summary-section" style={{ marginBottom: '1.5rem' }}>
-          <div className="section-title" style={{ marginTop: 0 }}>
+        <details className="card page-summary-section quality-disclosure" style={{ marginBottom: '1.5rem' }}>
+          <summary>
             <div>
-              <h2>分析总览</h2>
-              <p>普通用户只需要关注画像是否完成、证据覆盖和模拟实验台是否可用。</p>
+              <strong>更多分析指标</strong>
+              <span>字数、多样性、语料类型等辅助指标，默认折叠。</span>
             </div>
             <span className={simulationReady ? 'badge badge-success' : 'badge badge-warning'}>
               {simulationReady ? '模拟已准备' : '等待模拟准备'}
             </span>
-          </div>
+          </summary>
           <div className="quality-grid">
             <QualityMetric label="资料字数" value={profile.analysis_quality.total_chars.toLocaleString()} />
             <QualityMetric label="文档数量" value={String(profile.analysis_quality.document_count)} />
@@ -1435,7 +1635,7 @@ export default function ProfileDetailPage() {
             <QualityMetric label="包含长文" value={profile.analysis_quality.has_long_text ? '是' : '否'} />
             <QualityMetric label="多情绪场景" value={profile.analysis_quality.has_multi_emotion ? '是' : '否'} />
           </div>
-        </div>
+        </details>
       )}
 
       <section id="runtime" className="card simplified-runtime-card page-section-anchor page-runtime-section" style={{ marginBottom: '1.5rem' }}>
@@ -1453,7 +1653,7 @@ export default function ProfileDetailPage() {
           <div className="runtime-empty-state subtle-panel">
             <span className="badge badge-muted">waiting</span>
             <h4>请先点击重新分析，系统会自动准备模拟实验台。</h4>
-            <p>完成后可运行 Nuwa 思维模拟、Colleague 互动模拟，或双引擎对比。</p>
+            <p>完成后可运行思维模拟、互动模拟，或对比模拟。</p>
           </div>
         ) : (
           <div className="runtime-lab-grid simplified">
@@ -1462,9 +1662,9 @@ export default function ProfileDetailPage() {
                 <label>模式</label>
                 <div className="runtime-engine-selector simple">
                   {[
-                    { value: 'nuwa' as const, label: 'Nuwa 思维模拟', ready: nuwaRunnable },
-                    { value: 'colleague' as const, label: 'Colleague 互动模拟', ready: colleagueRunnable },
-                    { value: 'compare' as const, label: '双引擎对比', ready: Boolean(nuwaRunnable && colleagueRunnable) },
+                    { value: 'nuwa' as const, label: '思维模拟', ready: nuwaRunnable },
+                    { value: 'colleague' as const, label: '互动模拟', ready: colleagueRunnable },
+                    { value: 'compare' as const, label: '对比模拟', ready: Boolean(nuwaRunnable && colleagueRunnable) },
                   ].map(item => (
                     <button
                       key={item.value}
@@ -1497,7 +1697,7 @@ export default function ProfileDetailPage() {
                   '这个人遇到复杂选择时会怎么判断？',
                   '这个人的沟通风格是什么？',
                   '如果资料不足，你会如何回答？',
-                  '两个引擎对同一问题有什么不同？',
+                  '两个模拟视角对同一问题有什么不同？',
                 ].map(prompt => (
                   <button key={prompt} type="button" onClick={() => handleRuntimeExamplePrompt(prompt)}>
                     {prompt}
@@ -1518,7 +1718,7 @@ export default function ProfileDetailPage() {
               {!canRunWebsiteRuntime && (
                 <p className="runtime-help-text">
                   {runtimeLabSkillType === 'compare'
-                    ? '需要同时生成 Nuwa 和 Colleague 才能对比。'
+                    ? '需要同时准备思维模拟和互动模拟才能对比。'
                     : '请先点击重新分析，系统会自动准备模拟实验台。'}
                 </p>
               )}
@@ -1532,6 +1732,7 @@ export default function ProfileDetailPage() {
               ) : websiteRuntimeResult ? (
                 <RuntimeResultView
                   result={websiteRuntimeResult}
+                  showTrace={adminView}
                   traceOpen={runtimeTraceOpen}
                   copied={copied}
                   feedbackRating={feedbackRating}
@@ -1552,7 +1753,7 @@ export default function ProfileDetailPage() {
                 <div className="runtime-placeholder subtle-panel">
                   <span className="badge badge-muted">等待运行</span>
                   <h4>输入问题后运行模拟</h4>
-                  <p>结果会包含回答、证据依据、使用的 Skill 文件、不确定性、安全边界和折叠技术 trace。</p>
+                  <p>结果会包含回答、证据依据、不确定性和安全边界；技术细节默认隐藏。</p>
                 </div>
               )}
             </div>
@@ -1565,7 +1766,7 @@ export default function ProfileDetailPage() {
         <div className="section-title" style={{ marginTop: 0 }}>
           <div>
             <h2>资料管理</h2>
-            <p>上传、预览、删除或重建文本片段；复杂文档由 MinerU 解析。</p>
+            <p>上传、预览、删除或重建文本片段；复杂文档会自动解析为可分析文本。</p>
           </div>
         </div>
 
@@ -1574,15 +1775,17 @@ export default function ProfileDetailPage() {
           <div className={`subtle-panel mineru-status-banner ${mineruStatus.installed && mineruStatus.enabled ? 'mineru-ready' : 'mineru-missing'}`}>
             {mineruStatus.installed && mineruStatus.enabled ? (
               <div>
-                <span className="badge badge-success">MinerU 文档解析已启用</span>
+                <span className="badge badge-success">复杂文档解析已启用</span>
                 <span style={{ marginLeft: '0.75rem', fontSize: '0.8rem', color: 'var(--muted)' }}>
-                  backend={mineruStatus.backend} · method={mineruStatus.method} · lang={mineruStatus.lang}
-                  {mineruStatus.image_analysis && ' · 图片分析: 开'}
+                  复杂文档会自动解析为可分析文本。
                 </span>
-                <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: '0.35rem' }}>
-                  pipeline 更快更稳，hybrid-auto-engine 更强但更慢。
-                  {mineruStatus.backend === 'hybrid-auto-engine' && ' 当前使用 hybrid 后端，解析大型文档可能需要数分钟。'}
-                </div>
+                {adminView && (
+                  <div className="admin-diagnostics-inline">
+                    backend={mineruStatus.backend} · method={mineruStatus.method} · lang={mineruStatus.lang}
+                    {mineruStatus.image_analysis && ' · 图片分析: 开'}
+                    {mineruStatus.backend === 'hybrid-auto-engine' && ' · hybrid 后端解析大型文档可能需要数分钟'}
+                  </div>
+                )}
               </div>
             ) : (
               <span>复杂文档解析未启用，仅支持 txt / md / json / csv</span>
@@ -1670,12 +1873,15 @@ export default function ProfileDetailPage() {
                     >
                       预览
                     </button>
-                    <button
-                      className="btn-sm"
-                      onClick={() => setDeletingId(doc.id)}
-                    >
-                      删除
-                    </button>
+                    <details className="file-more-actions">
+                      <summary>更多</summary>
+                      <button
+                        className="btn-sm"
+                        onClick={() => setDeletingId(doc.id)}
+                      >
+                        删除资料
+                      </button>
+                    </details>
                   </div>
                 </div>
               </div>
@@ -1695,55 +1901,74 @@ export default function ProfileDetailPage() {
             <div className="section-title">
               <div>
                 <h2>证据化画像</h2>
-                <p>14 个分析模块默认展示摘要；展开后可查看完整判断，证据链通过弹窗查看。</p>
+                <p>模块默认以列表展示，点击后在抽屉中查看完整判断和证据。</p>
               </div>
-              <span className="badge badge-info">{portraitSections.length} modules</span>
+              <div className="portrait-actions">
+                <span className="badge badge-info">{portraitSections.length} modules</span>
+              </div>
             </div>
-            <div className="portrait-module-grid">
-              {portraitSections.map(s => {
-                const evidence = getEvidenceForSection(s.title)
-                const moduleNo = (s.title.match(/^(\d+)\./) || ['', ''])[1]
-                const claimCount = evidence?.claims?.length || 0
-                const avgClaimConfidence = claimCount
-                  ? Math.round(evidence!.claims.reduce((sum, c) => sum + (c.confidence_score || 0), 0) / claimCount)
-                  : null
+            <div className="portrait-filter-row" role="tablist" aria-label="画像过滤">
+              {[
+                ['all', '全部'],
+                ['evidence', '有证据'],
+                ['insufficient', '资料不足'],
+                ['high', '高置信度'],
+                ['low', '低置信度'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={portraitFilter === value ? 'active' : ''}
+                  onClick={() => setPortraitFilter(value as PortraitFilter)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="portrait-compact-list">
+              {filteredPortraitItems.map(item => {
                 return (
-                  <article key={s.anchor} id={s.anchor} className={`dashboard-card portrait-module-card ${evidence && !evidence.data_sufficient ? 'insufficient' : ''}`}>
-                    <div className="dashboard-card-header">
+                  <article key={item.section.anchor} id={item.section.anchor} className={`compact-card portrait-list-item ${item.evidence && !item.evidence.data_sufficient ? 'insufficient' : ''}`}>
+                    <div className="portrait-list-main">
                       <div>
-                        <div className="module-index">Module {moduleNo || '--'}</div>
-                        <h3>{s.title.replace(/^\d+\.\s*/, '')}</h3>
-                        <div className="status-row" style={{ marginTop: '0.45rem' }}>
-                          {evidence ? (
+                        <div className="module-index">Module {item.moduleNo || '--'}</div>
+                        <h3>{item.title}</h3>
+                        <p>{item.summary}</p>
+                        <div className="status-row">
+                          {item.evidence ? (
                             <>
-                              <span className={evidence.data_sufficient ? 'badge badge-success' : 'badge badge-warning'}>
-                                {evidence.data_sufficient ? '有证据' : '资料不足'}
+                              <span className={item.evidence.data_sufficient ? 'badge badge-success' : 'badge badge-warning'}>
+                                {item.evidence.data_sufficient ? '有证据' : '资料不足'}
                               </span>
-                              <span className="badge badge-muted">{claimCount} 条判断</span>
-                              {avgClaimConfidence !== null && <span className="badge badge-info">置信度 {avgClaimConfidence}/100</span>}
+                              <span className="badge badge-muted">{item.claimCount} 条判断</span>
+                              {item.avgClaimConfidence !== null && <span className="badge badge-info">置信度 {item.avgClaimConfidence}/100</span>}
                             </>
                           ) : (
-                            <span className="badge badge-muted">旧报告未含 evidence_map</span>
+                            <span className="badge badge-muted">建议重新分析生成证据链</span>
                           )}
                         </div>
                       </div>
                       <button
                         className="btn-sm"
-                        onClick={() => setEvidenceModal({ moduleName: s.title, moduleIndex: moduleNo })}
+                        type="button"
+                        onClick={() => setPortraitDrawer({
+                          title: item.title,
+                          content: item.section.content,
+                          moduleNo: item.moduleNo,
+                          evidence: item.evidence,
+                        })}
                       >
-                        {evidence ? '查看证据' : '无证据'}
+                        查看详情
                       </button>
                     </div>
-                    <p className="portrait-module-summary">{summarizeEvidenceModule(evidence, s.content)}</p>
-                    <details className="portrait-module-details">
-                      <summary>展开详情</summary>
-                      <div className="card-body">
-                        <ReactMarkdown>{s.content}</ReactMarkdown>
-                      </div>
-                    </details>
                   </article>
                 )
               })}
+              {filteredPortraitItems.length === 0 && (
+                <div className="empty-state compact-empty">
+                  <p>当前筛选下没有画像模块。</p>
+                </div>
+              )}
             </div>
           </>
         ) : (
@@ -1803,71 +2028,139 @@ export default function ProfileDetailPage() {
         <div className="section-title" style={{ marginTop: 0 }}>
           <div>
             <h2>导出与维护</h2>
-            <p>优先导出完整分析报告；数据集和 Skill 包导出适合后续高级使用。</p>
+            <p>优先导出完整分析报告；数据集和能力文件适合后续高级使用。</p>
           </div>
         </div>
-        <div className="action-grid">
+        <div className="action-grid export-primary-grid">
           <ExportAction title="完整分析报告" desc="导出包含画像、证据链和风格卡的 Markdown 报告。">
             <button className="btn-primary" onClick={handleExportAnalysisReport} disabled={!profile.has_analysis || exporting === 'analysis-report'}>
               {exporting === 'analysis-report' ? <><span className="spinner" /> 导出中</> : '导出报告'}
             </button>
           </ExportAction>
-          <ExportAction title="Skill Card" desc="导出 SKILL.md 风格卡，用于提示词或 agent 技能。">
-            <button className="btn-secondary" onClick={handleExportSkillCard} disabled={!profile.has_analysis || exporting === 'skill-card'}>
-              {exporting === 'skill-card' ? <><span className="spinner" /> 导出中</> : '导出'}
-            </button>
-          </ExportAction>
-          <ExportAction title="RAG Dataset" desc="Easy Dataset 兼容 JSONL，包含片段和证据 metadata。">
-            <button className="btn-secondary" onClick={handleExportRAGDataset} disabled={profile.chunk_count === 0 || exporting === 'rag'}>
-              {exporting === 'rag' ? <><span className="spinner" /> 导出中</> : '导出'}
-            </button>
-          </ExportAction>
-          <ExportAction title="SFT Dataset" desc="生成训练样本 JSONL，便于后续高级数据整理。">
-            <button className="btn-secondary" onClick={handleExportSFT} disabled={profile.chunk_count === 0 || exporting === 'sft'}>
-              {exporting === 'sft' ? <><span className="spinner" /> 导出中</> : '导出'}
-            </button>
-          </ExportAction>
-          <ExportAction title="文本片段维护" desc="重新从已有文档构建 chunks，不删除原始文件。">
-            <button className="btn-secondary" onClick={handleRebuildChunks} disabled={rebuilding || profile.chunk_count === 0}>
-              {rebuilding ? <><span className="spinner" /> 重建中</> : '重建文本片段'}
-            </button>
-          </ExportAction>
         </div>
+        <details className="advanced-export-details">
+          <summary>
+            <strong>高级导出与维护</strong>
+            <span>风格卡、RAG Dataset、SFT Dataset 和文本片段维护。</span>
+          </summary>
+          <div className="action-grid">
+            <ExportAction title="风格卡" desc="导出结构化风格卡，用于后续提示词或模拟配置。">
+              <button className="btn-secondary" onClick={handleExportSkillCard} disabled={!profile.has_analysis || exporting === 'skill-card'}>
+                {exporting === 'skill-card' ? <><span className="spinner" /> 导出中</> : '导出'}
+              </button>
+            </ExportAction>
+            <ExportAction title="RAG Dataset" desc="Easy Dataset 兼容 JSONL，包含片段和证据 metadata。">
+              <button className="btn-secondary" onClick={handleExportRAGDataset} disabled={profile.chunk_count === 0 || exporting === 'rag'}>
+                {exporting === 'rag' ? <><span className="spinner" /> 导出中</> : '导出'}
+              </button>
+            </ExportAction>
+            <ExportAction title="SFT Dataset" desc="生成训练样本 JSONL，便于后续高级数据整理。">
+              <button className="btn-secondary" onClick={handleExportSFT} disabled={profile.chunk_count === 0 || exporting === 'sft'}>
+                {exporting === 'sft' ? <><span className="spinner" /> 导出中</> : '导出'}
+              </button>
+            </ExportAction>
+            <ExportAction title="文本片段维护" desc="重新从已有文档构建 chunks，不删除原始文件。">
+              <button className="btn-secondary" onClick={handleRebuildChunks} disabled={rebuilding || profile.chunk_count === 0}>
+                {rebuilding ? <><span className="spinner" /> 重建中</> : '重建文本片段'}
+              </button>
+            </ExportAction>
+          </div>
+          <p className="export-note">RAG Dataset = 检索数据 JSONL · SFT Dataset = 训练样本 JSONL。</p>
+        </details>
         {!profile.has_analysis && (
           <p style={{ fontSize: '0.8rem', color: 'var(--c-text-muted)', marginTop: '0.5rem' }}>
-            Skill Card 需要先生成画像报告和风格卡
+            风格卡需要先生成画像报告
           </p>
         )}
-        <p style={{ fontSize: '0.75rem', color: 'var(--c-text-muted)', marginTop: '0.25rem' }}>
-          RAG Dataset = 检索数据 JSONL · SFT Dataset = 训练样本 JSONL
-        </p>
       </div>
+      </div>
+      </div>
+
+      {portraitDrawer && (
+        <div className="drawer-backdrop" onClick={() => setPortraitDrawer(null)}>
+          <aside className="drawer-panel bottom-sheet" onClick={e => e.stopPropagation()} aria-label="画像模块详情">
+            <div className="drawer-header">
+              <div>
+                <span className="badge badge-info">Module {portraitDrawer.moduleNo || '--'}</span>
+                <h3>{portraitDrawer.title}</h3>
+              </div>
+              <button className="modal-close" onClick={() => setPortraitDrawer(null)} aria-label="关闭">×</button>
+            </div>
+            <div className="drawer-body">
+              <div className="portrait-drawer-summary">
+                {portraitDrawer.evidence ? (
+                  <div className="status-row">
+                    <span className={portraitDrawer.evidence.data_sufficient ? 'badge badge-success' : 'badge badge-warning'}>
+                      {portraitDrawer.evidence.data_sufficient ? '有证据' : '资料不足'}
+                    </span>
+                    <span className="badge badge-muted">{portraitDrawer.evidence.claims.length} 条判断</span>
+                  </div>
+                ) : (
+                  <p className="legacy-module-note">该模块来自旧版报告，建议重新分析以生成证据链。</p>
+                )}
+              </div>
+              <div className="drawer-markdown">
+                <ReactMarkdown>{portraitDrawer.content}</ReactMarkdown>
+              </div>
+              {portraitDrawer.evidence && (
+                <div className="drawer-evidence-list">
+                  <h4>证据摘要</h4>
+                  {portraitDrawer.evidence.claims.slice(0, 6).map((claim, index) => (
+                    <div className="evidence-claim compact-evidence-claim" key={`${claim.claim}-${index}`}>
+                      <strong>{claim.claim}</strong>
+                      <div className="evidence-meta">
+                        <span className="badge badge-info">置信度 {claim.confidence_score}/100</span>
+                        <span className="badge badge-muted">{claim.evidence.length} quotes</span>
+                      </div>
+                      {claim.evidence[0]?.quote && (
+                        <blockquote className="quote-block">
+                          {claim.evidence[0].quote.length > 220 ? `${claim.evidence[0].quote.slice(0, 220)}...` : claim.evidence[0].quote}
+                        </blockquote>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    className="btn-secondary"
+                    onClick={() => {
+                      setEvidenceModal({ moduleName: `${portraitDrawer.moduleNo}. ${portraitDrawer.title}`, moduleIndex: portraitDrawer.moduleNo })
+                    }}
+                  >
+                    查看完整证据
+                  </button>
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* ── Preview Modal ── */}
       {previewDoc && (
-        <div className="modal-overlay" onClick={() => setPreviewDoc(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
+        <div className="drawer-backdrop" onClick={() => setPreviewDoc(null)}>
+          <aside className="drawer-panel bottom-sheet file-preview-drawer" onClick={e => e.stopPropagation()} aria-label="资料预览">
+            <div className="drawer-header">
               <div>
                 <h3 style={{ margin: 0, fontSize: '1rem' }}>资料预览</h3>
                 <p style={{ color: 'var(--muted)', fontSize: '0.82rem', marginTop: '0.25rem' }}>{previewDoc.filename}</p>
               </div>
               <button className="modal-close" onClick={() => setPreviewDoc(null)} aria-label="关闭">×</button>
             </div>
-            <div className="status-row" style={{ marginBottom: '0.75rem' }}>
-              <span className="badge badge-muted">parser · {previewDoc.parser || 'builtin'}</span>
-              <span className="badge badge-muted">状态 · {previewDoc.parse_status || '正常'}</span>
-              <span className="badge badge-muted">{previewDoc.char_count.toLocaleString()} 字符</span>
+            <div className="drawer-body">
+              <div className="status-row" style={{ marginBottom: '0.75rem' }}>
+                <span className="badge badge-muted">解析 · {previewDoc.parser || 'builtin'}</span>
+                <span className="badge badge-muted">状态 · {previewDoc.parse_status || '正常'}</span>
+                <span className="badge badge-muted">{previewDoc.char_count.toLocaleString()} 字符</span>
+              </div>
+              <pre className="preview-pre">
+                {previewDoc.preview_text}
+              </pre>
+              {previewDoc.preview_text.length >= 3000 && (
+                <p style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: '0.5rem' }}>
+                  仅显示前 3000 字。完整内容请查看原始文件。
+                </p>
+              )}
             </div>
-            <pre className="preview-pre">
-              {previewDoc.preview_text}
-            </pre>
-            {previewDoc.preview_text.length >= 3000 && (
-              <p style={{ fontSize: '0.75rem', color: 'var(--c-text-muted)', marginTop: '0.5rem' }}>
-                仅显示前 3000 字。完整内容请查看原始文件。
-              </p>
-            )}
-          </div>
+          </aside>
         </div>
       )}
 
@@ -2185,12 +2478,12 @@ function PageMiniNav({
   activeSection,
   onSelect,
 }: {
-  items: { id: string; label: string }[];
+  items: { id: string; label: string; hint?: string }[];
   activeSection: string;
   onSelect: (id: string) => void;
 }) {
   return (
-    <nav className="profile-mini-nav" aria-label="页面导航">
+    <nav className="profile-mini-nav workbench-sidebar workbench-tabs" aria-label="页面导航">
       {items.map(item => (
         <button
           type="button"
@@ -2198,7 +2491,8 @@ function PageMiniNav({
           className={activeSection === item.id ? 'active' : ''}
           onClick={() => onSelect(item.id)}
         >
-          {item.label}
+          <strong>{item.label}</strong>
+          {item.hint && <span>{item.hint}</span>}
         </button>
       ))}
     </nav>
@@ -2229,6 +2523,62 @@ function PipelinePanel({
     warning: '提示',
     failed: '失败',
   }
+  if (!analyzing && result) {
+    const needUpload = result.pipeline_status === 'need_upload' || chunkCount === 0
+    const hasErrors = result.errors.length > 0
+    const compactTone = needUpload || result.warnings.length > 0
+      ? 'badge badge-warning'
+      : hasErrors
+        ? 'badge badge-danger'
+        : simulationReady
+          ? 'badge badge-success'
+          : 'badge badge-info'
+    const compactTitle = needUpload
+      ? '请先上传资料'
+      : hasErrors
+        ? '分析流程存在错误'
+        : simulationReady
+          ? '模拟实验台已准备'
+          : '画像已完成，部分模拟准备存在提示'
+    const compactDesc = needUpload
+      ? '上传授权资料后即可开始分析，后续会自动生成画像并准备模拟实验台。'
+      : result.warnings[0] || result.next_actions[0] || '分析流程已收尾。'
+    return (
+      <section className="card pipeline-panel pipeline-panel-compact page-pipeline-section">
+        <div className="pipeline-compact-head">
+          <div>
+            <span className={compactTone}>{needUpload ? '需要资料' : hasErrors ? '需要检查' : '流程完成'}</span>
+            <h2>{compactTitle}</h2>
+            <p>{compactDesc}</p>
+          </div>
+          <button className="btn-secondary" onClick={onRun} disabled={chunkCount === 0}>
+            {hasAnalysis ? '重新分析' : '开始分析'}
+          </button>
+        </div>
+        <details className="pipeline-compact-details">
+          <summary>查看流程步骤</summary>
+          <div className="pipeline-stepper compact">
+            {PIPELINE_STEPS.map(item => {
+              const status = steps[item.key] || 'pending'
+              return (
+                <div className={`pipeline-step ${status}`} key={item.key}>
+                  <span>{statusLabel[status] || status}</span>
+                  <strong>{item.title}</strong>
+                  <p>{item.desc}</p>
+                </div>
+              )
+            })}
+          </div>
+          {result.warnings.length > 0 && (
+            <div className="pipeline-message warning">{result.warnings.slice(0, 3).join('；')}</div>
+          )}
+          {result.errors.length > 0 && (
+            <div className="pipeline-message failed">{result.errors.join('；')}</div>
+          )}
+        </details>
+      </section>
+    )
+  }
   return (
     <section className="card pipeline-panel page-pipeline-section">
       <div className="pipeline-panel-head">
@@ -2237,7 +2587,7 @@ function PipelinePanel({
             {simulationReady ? '模拟已准备' : hasAnalysis ? '分析已完成' : '待分析'}
           </span>
           <h2>{hasAnalysis ? '重新分析并准备模拟' : '开始分析'}</h2>
-          <p>系统会自动完成资料解析、证据画像、Nuwa / Colleague Skill 生成和站内模拟准备。</p>
+          <p>系统会自动完成资料解析、证据画像、模拟能力准备和站内模拟入口开放。</p>
         </div>
         <button className="btn-primary" onClick={onRun} disabled={analyzing || chunkCount === 0}>
           {analyzing ? <><span className="spinner" /> 准备中</> : hasAnalysis ? '重新分析' : '开始分析'}
@@ -2403,6 +2753,7 @@ function ExpandableMarkdown({
 
 function RuntimeResultView({
   result,
+  showTrace,
   traceOpen,
   copied,
   feedbackRating,
@@ -2417,6 +2768,7 @@ function RuntimeResultView({
   onSubmitFeedback,
 }: {
   result: SkillWebsiteRun;
+  showTrace: boolean;
   traceOpen: boolean;
   copied: string;
   feedbackRating: SkillRuntimeFeedbackPayload['rating'];
@@ -2438,32 +2790,53 @@ function RuntimeResultView({
     { value: 'unsafe', label: '不安全' },
     { value: 'inaccurate', label: '不准确' },
   ]
+  const [activeResultTab, setActiveResultTab] = useState<'answer' | 'evidence' | 'uncertainty' | 'safety' | 'trace'>('answer')
+  const resultTabs: { id: typeof activeResultTab; label: string }[] = [
+    { id: 'answer', label: '回答' },
+    { id: 'evidence', label: `证据 ${result.evidence_used.length}` },
+    { id: 'uncertainty', label: '不确定性' },
+    { id: 'safety', label: '安全' },
+    ...(showTrace ? [{ id: 'trace' as const, label: '技术记录' }] : []),
+  ]
   return (
     <div className="runtime-result-card slide-up">
       <div className="runtime-result-head">
         <div>
           <span className={runtimeStatusBadgeClass(result.status)}>{result.status}</span>
-          <h4>{result.skill_type} · {runtimeModeLabel(result.runtime_mode)}</h4>
+          <h4>{skillTypeLabel(result.skill_type as 'nuwa' | 'colleague' | 'compare')} · {runtimeModeLabel(result.runtime_mode)}</h4>
           <p>{result.model_provider || 'provider unavailable'} · {formatDateTime(result.created_at)}</p>
         </div>
         <button className="btn-sm" onClick={onCopy}>
-          {copied === 'website-runtime-answer' ? '已复制' : 'Copy Answer'}
+          {copied === 'website-runtime-answer' ? '已复制' : '复制回答'}
         </button>
-        {copied === 'website-runtime-answer' && <span className="runtime-copy-toast">Answer copied</span>}
+        {copied === 'website-runtime-answer' && <span className="runtime-copy-toast">已复制</span>}
       </div>
 
       {result.error && <div className="warning-panel">模拟运行失败，请查看高级技术详情。</div>}
 
-      <div className="runtime-result-sections">
-        <section className="runtime-output-section runtime-answer-card">
+      <div className="result-tabs" role="tablist" aria-label="模拟结果">
+        {resultTabs.map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            className={activeResultTab === tab.id ? 'active' : ''}
+            onClick={() => setActiveResultTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="runtime-result-sections single-result-panel">
+        {activeResultTab === 'answer' && <section className="runtime-output-section runtime-answer-card">
           <div className="runtime-output-title">
             <strong>核心回答</strong>
             <span className="badge badge-muted">markdown</span>
           </div>
           <ExpandableMarkdown content={result.answer || result.error} maxChars={760} />
-        </section>
+        </section>}
 
-        <section className="runtime-output-section">
+        {activeResultTab === 'evidence' && <section className="runtime-output-section">
           <div className="runtime-output-title">
             <strong>证据依据</strong>
             <span className="badge badge-muted">{result.evidence_used.length}</span>
@@ -2499,9 +2872,9 @@ function RuntimeResultView({
               {result.files_used.slice(0, 8).map(file => <span key={file}>{file}</span>)}
             </div>
           )}
-        </section>
+        </section>}
 
-        <section className="runtime-output-section">
+        {activeResultTab === 'uncertainty' && <section className="runtime-output-section">
           <div className="runtime-output-title">
             <strong>不确定性 / 资料缺口</strong>
             <span className="badge badge-muted">{result.uncertainty_notes.length}</span>
@@ -2511,9 +2884,9 @@ function RuntimeResultView({
           ) : (
             <p>本次运行未标记额外不确定性。</p>
           )}
-        </section>
+        </section>}
 
-        <section className="runtime-output-section">
+        {activeResultTab === 'safety' && <section className="runtime-output-section">
           <div className="runtime-output-title"><strong>安全边界</strong></div>
           <div className="status-row">
             <span className={safety.blocked ? 'badge badge-danger' : 'badge badge-success'}>
@@ -2521,20 +2894,22 @@ function RuntimeResultView({
             </span>
             {(safety.risk_flags || []).map((flag: string) => <span className="badge badge-warning" key={flag}>{flag}</span>)}
           </div>
-        </section>
-      </div>
+        </section>}
 
-      <section className="runtime-output-section runtime-trace-box">
-        <button className="btn-sm" onClick={onToggleTrace}>
-          {traceOpen ? '收起 Runtime Trace' : '展开 Runtime Trace'}
-        </button>
-        {traceOpen && <pre className="preview-pre">{JSON.stringify(result.runtime_trace, null, 2)}</pre>}
-      </section>
+        {showTrace && activeResultTab === 'trace' && (
+          <section className="runtime-output-section runtime-trace-box">
+            <button className="btn-sm" onClick={onToggleTrace}>
+              {traceOpen ? '收起技术记录' : '展开技术记录'}
+            </button>
+            {traceOpen && <pre className="preview-pre">{JSON.stringify(result.runtime_trace, null, 2)}</pre>}
+          </section>
+        )}
+      </div>
 
       <div className="runtime-feedback-strip">
         <div>
           <strong>这次运行是否有帮助？</strong>
-          <p>反馈已记录到 correction history，暂不会自动重写 Skill。</p>
+          <p>反馈会记录为修正线索，暂不会自动改写模拟能力。</p>
         </div>
         <div className="feedback-chip-row">
           {feedbackOptions.map(option => (
@@ -2578,19 +2953,15 @@ function CompareRuntimeView({
 }) {
   return (
     <div className="compare-runtime-result slide-up">
-      <div className="compare-runtime-grid">
-        <RuntimeMiniResult title="Nuwa" result={result.nuwa_result} onCopy={() => onCopy(result.nuwa_result)} copied={copied} />
-        <RuntimeMiniResult title="Colleague" result={result.colleague_result} onCopy={() => onCopy(result.colleague_result)} copied={copied} />
-      </div>
       <div className="comparison-summary">
-        <strong>Comparison summary</strong>
+        <strong>差异总结</strong>
         <p>{result.comparison_summary}</p>
       </div>
       <div className="difference-table">
         <div className="difference-table-head">
           <strong>维度</strong>
-          <span>Nuwa</span>
-          <span>Colleague</span>
+          <span>思维模拟</span>
+          <span>互动模拟</span>
         </div>
         {result.difference_table.map(row => (
           <div key={row.dimension}>
@@ -2601,8 +2972,12 @@ function CompareRuntimeView({
         ))}
       </div>
       <div className="runtime-recommendation">
-        <strong>Recommendation</strong>
+        <strong>推荐使用场景</strong>
         <p>{result.recommendation}</p>
+      </div>
+      <div className="compare-runtime-grid">
+        <RuntimeMiniResult title="思维模拟摘要" result={result.nuwa_result} onCopy={() => onCopy(result.nuwa_result)} copied={copied} />
+        <RuntimeMiniResult title="互动模拟摘要" result={result.colleague_result} onCopy={() => onCopy(result.colleague_result)} copied={copied} />
       </div>
     </div>
   )
@@ -2626,7 +3001,7 @@ function RuntimeMiniResult({
         <div>
           <span className={runtimeStatusBadgeClass(result.status)}>{result.status}</span>
           <h4>{title}</h4>
-          <p>{runtimeModeLabel(result.runtime_mode)} · {result.evidence_used.length} evidence</p>
+          <p>{runtimeModeLabel(result.runtime_mode)} · {result.evidence_used.length} 条证据</p>
         </div>
         <button className="btn-sm" onClick={onCopy}>{copied === 'website-runtime-answer' ? '已复制' : '复制'}</button>
       </div>

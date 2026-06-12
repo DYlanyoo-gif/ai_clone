@@ -1,5 +1,16 @@
 const BASE = '/api';
 
+export function isAdminView(): boolean {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get('admin') === '1' || window.localStorage.getItem('echo_admin_mode') === 'true';
+}
+
+export function enableAdminView(): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem('echo_admin_mode', 'true');
+}
+
 function extractErrorMessage(errBody: any, status: number, statusText: string): string {
   if (!errBody) return `请求失败 (HTTP ${status}: ${statusText})`;
   // FastAPI 422: detail is an array of {loc, msg, type}

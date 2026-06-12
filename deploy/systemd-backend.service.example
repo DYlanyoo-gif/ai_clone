@@ -1,0 +1,16 @@
+[Unit]
+Description=Echo Profile FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai_clone/backend
+EnvironmentFile=/opt/ai_clone/.env
+ExecStart=/opt/ai_clone/backend/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target
